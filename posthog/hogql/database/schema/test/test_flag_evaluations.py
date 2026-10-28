@@ -699,6 +699,19 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
                 [(1,)],
             ),
             (
+                "posthog_events_qualified_without_an_alias",
+                "SELECT count(posthog.events.uuid) FROM posthog.events "
+                "WHERE posthog.events.event = '$feature_flag_called' "
+                "AND posthog.events.properties.$feature_flag = 'probe-flag' "
+                "AND posthog.events.timestamp >= now() - INTERVAL 7 DAY",
+                [(1,)],
+            ),
+            (
+                "posthog_events_as_one_quoted_name",
+                f"SELECT count(`posthog.events`.uuid) FROM `posthog.events` WHERE {FLAG_CALL_CONJUNCTS}",
+                [(1,)],
+            ),
+            (
                 "alias_named_flag_key_read_back",
                 "SELECT properties.$feature_flag AS flag_key, count() FROM events "
                 f"WHERE {FLAG_CALL_CONJUNCTS} GROUP BY flag_key",
@@ -794,6 +807,11 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
                 PersonsOnEventsMode.DISABLED,
             ),
             (
+                "posthog_events_person_id_through_distinct_ids",
+                f"SELECT person_id FROM posthog.events WHERE {FLAG_CALL_CONJUNCTS}",
+                "a name in it would read a different column",
+            ),
+            (
                 "current_person_properties",
                 f"SELECT person.properties.email FROM events WHERE {FLAG_CALL_CONJUNCTS}",
                 "a name in it would read a different column",
@@ -848,6 +866,11 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
                 "select_star_of_flag_calls_and_other_events",
                 "SELECT * FROM events WHERE event IN ('$feature_flag_called', '$pageview') "
                 "AND timestamp >= now() - INTERVAL 7 DAY",
+            ),
+            (
+                "cte_named_posthog_events",
+                "WITH `posthog.events` AS (SELECT uuid, event, properties, timestamp FROM posthog.flag_evaluations) "
+                f"SELECT uuid FROM posthog.events WHERE {FLAG_CALL_CONJUNCTS}",
             ),
         ]
     )
