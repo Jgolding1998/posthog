@@ -800,6 +800,7 @@ class HogQLCohortQuery:
 @frozen
 class FlagCallReads:
     rewrite_enabled: bool
+    only_in_flag_evaluations: bool
     reads_from_events: int
 
 
@@ -815,5 +816,6 @@ def batch_flag_call_reads(cohort: Cohort, team: Team) -> FlagCallReads:
     prepared = executor.clickhouse_prepared_ast
     return FlagCallReads(
         rewrite_enabled=context.database is not None and context.database.read_flag_calls_from_flag_evaluations,
+        only_in_flag_evaluations=context.database is not None and context.database.flag_calls_only_in_flag_evaluations,
         reads_from_events=count_flag_calls_read_from_events(prepared) if prepared is not None else 0,
     )
