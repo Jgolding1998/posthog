@@ -484,11 +484,9 @@ class TestCanReadFlagEvaluations(SimpleTestCase):
         assert self._can_read(query) is False
 
     def test_counts_a_joined_table_as_having_every_column_without_a_database(self):
-        assert self._can_read(_beside("JOIN raw_cohort_people AS c ON e.person_id = c.person_id")) is True
-        assert (
-            self._can_read(_beside("JOIN raw_cohort_people AS c ON e.person_id = c.person_id"), with_database=False)
-            is False
-        )
+        query = _beside("JOIN raw_cohort_people AS c ON e.person_id = c.person_id")
+        assert self._can_read(query) is True
+        assert self._can_read(query, with_database=False) is False
 
     @parameterized.expand(
         [

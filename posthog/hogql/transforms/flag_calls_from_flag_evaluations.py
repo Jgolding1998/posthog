@@ -373,14 +373,15 @@ class _EventsScan:
         join: ast.JoinExpr,
         alias: str,
         other_source_has: _HasName,
+        other_tables: frozenset[str],
         flag_key_compares_as_string: Callable[[], bool],
     ):
         self.join = join
         self.alias = alias
         self.other_source_has = other_source_has
+        self.other_tables = other_tables
         self.flag_key_compares_as_string = flag_key_compares_as_string
         self.shadowed: frozenset[str] = frozenset()
-        self.other_tables: frozenset[str] = frozenset()
 
     @classmethod
     def of(
@@ -398,14 +399,14 @@ class _EventsScan:
         join = node.select_from
         if join is None or not isinstance(join.table, ast.Field) or join.table.chain != ["events"]:
             return None
+        ctes = ctes or {}
         scan = cls(
             join=join,
             alias=join.alias or "events",
-            other_source_has=_no_name if unqualified_reads_scan else _other_source_has(node, database, ctes or {}),
+            other_source_has=_no_name if unqualified_reads_scan else _other_source_has(node, database, ctes),
+            other_tables=frozenset() if unqualified_reads_scan else _other_table_names(node, ctes),
             flag_key_compares_as_string=flag_key_compares_as_string,
         )
-        if not unqualified_reads_scan:
-            scan.other_tables = _other_table_names(node, ctes or {})
         collector = _AliasCollector(node)
         collector.visit(node)
         # An alias such as `e.timestamp AS timestamp` reads the column it names, so it changes no read.
