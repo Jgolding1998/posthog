@@ -390,7 +390,14 @@ def prepare_ast_for_printing(
             ).visit(node)
 
         with context.timings.measure("resolve_lazy_tables"):
-            resolve_lazy_tables(node, dialect, stack, context, resolver_factory=resolver_factory)
+            resolve_lazy_tables(
+                node,
+                dialect,
+                stack,
+                context,
+                resolver_factory=resolver_factory,
+                swap_flag_calls_in_views=True,
+            )
 
         # Sibling aggregating LEFT JOINs over federated Postgres tables execute their scans
         # sequentially; merging them into one UNION ALL join overlaps the per-scan latency.

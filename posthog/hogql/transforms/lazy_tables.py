@@ -20,8 +20,15 @@ def resolve_lazy_tables(
     stack: Optional[list[ast.SelectQuery]],
     context: HogQLContext,
     resolver_factory: ResolverFactory | None = None,
+    swap_flag_calls_in_views: bool = False,
 ):
-    LazyTableResolver(stack=stack, context=context, dialect=dialect, resolver_factory=resolver_factory).visit(node)
+    LazyTableResolver(
+        stack=stack,
+        context=context,
+        dialect=dialect,
+        resolver_factory=resolver_factory,
+        swap_flag_calls_in_views=swap_flag_calls_in_views,
+    ).visit(node)
 
 
 @dataclasses.dataclass
@@ -180,6 +187,7 @@ class LazyTableResolver(TraversingVisitor):
         stack: Optional[list[ast.SelectQuery]],
         context: HogQLContext,
         resolver_factory: ResolverFactory | None = None,
+        swap_flag_calls_in_views: bool = False,
     ):
         super().__init__()
         self.field_collectors: list[list[ast.FieldType | ast.PropertyType]] = [[]] if stack else []
@@ -188,6 +196,8 @@ class LazyTableResolver(TraversingVisitor):
         # forwarded to nested resolve_types/resolve_lazy_tables calls so a caller-supplied
         # factory (e.g. BoundedResolver) applies to subqueries built mid-transform
         self.resolver_factory = resolver_factory
+        # A lazy join can read a saved view. The resolver inlines that view only during lazy-table resolution.
+        self.swap_flag_calls_in_views = swap_flag_calls_in_views
 
     def _find_tables_needing_lazy_preresolution(
         self,
@@ -249,9 +259,23 @@ class LazyTableResolver(TraversingVisitor):
         # Resolve types and lazy tables within the subquery
         subquery = cast(
             ast.SelectQuery,
-            resolve_types(subquery, self.context, self.dialect, [], resolver_factory=self.resolver_factory),
+            resolve_types(
+                subquery,
+                self.context,
+                self.dialect,
+                [],
+                resolver_factory=self.resolver_factory,
+                swap_flag_calls_in_views=self.swap_flag_calls_in_views,
+            ),
         )
-        resolve_lazy_tables(subquery, self.dialect, [subquery], self.context, resolver_factory=self.resolver_factory)
+        resolve_lazy_tables(
+            subquery,
+            self.dialect,
+            [subquery],
+            self.context,
+            resolver_factory=self.resolver_factory,
+            swap_flag_calls_in_views=self.swap_flag_calls_in_views,
+        )
         assert subquery.type is not None
 
         # Replace the table with the subquery
@@ -574,7 +598,12 @@ class LazyTableResolver(TraversingVisitor):
             subquery = cast(
                 ast.SelectQuery,
                 resolve_types(
-                    subquery, self.context, self.dialect, [select_type], resolver_factory=self.resolver_factory
+                    subquery,
+                    self.context,
+                    self.dialect,
+                    [select_type],
+                    resolver_factory=self.resolver_factory,
+                    swap_flag_calls_in_views=self.swap_flag_calls_in_views,
                 ),
             )
             if self.context.property_swapper is not None:
@@ -632,7 +661,12 @@ class LazyTableResolver(TraversingVisitor):
             join_to_add = cast(
                 ast.JoinExpr,
                 resolve_types(
-                    join_to_add, self.context, self.dialect, [select_type], resolver_factory=self.resolver_factory
+                    join_to_add,
+                    self.context,
+                    self.dialect,
+                    [select_type],
+                    resolver_factory=self.resolver_factory,
+                    swap_flag_calls_in_views=self.swap_flag_calls_in_views,
                 ),
             )
             if self.context.property_swapper is not None:

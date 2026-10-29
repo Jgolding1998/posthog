@@ -184,7 +184,8 @@ def resolve_flag_calls_from_flag_evaluations(
       materialized column. See `_swap_reads_properties_alike`.
 
     The resolver runs this on the body of each saved view that it inlines, and `view_name` names that view for the
-    error.
+    error. It always returns a value that `resolve` returned, unchanged, because the resolver uses that identity to
+    find the body it chose.
     """
     database = _swap_database(context)
     if database is None or not _swap_applies(node, context, database):

@@ -58,6 +58,7 @@ from products.access_control.backend.property_access_control import PropertyAcce
 from products.cohorts.backend.models.cohort import Cohort
 from products.cohorts.backend.models.util import insert_static_cohort
 from products.data_modeling.backend.facade.models import DataWarehouseSavedQuery
+from products.data_tools.backend.facade.models import DataWarehouseJoin
 from products.feature_flags.backend.facade.enums import FlagEvaluationsMode
 from products.feature_flags.backend.models.organization_feature_flags_config import OrganizationFeatureFlagsConfig
 
@@ -939,6 +940,16 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
                 ["probe-distinct-id"],
             ),
             (
+                "mode_2_union_body",
+                {
+                    "calls": "SELECT distinct_id FROM events WHERE event = '$feature_flag_called' "
+                    "UNION ALL SELECT 'other-distinct-id'"
+                },
+                "SELECT distinct_id FROM calls ORDER BY distinct_id",
+                FlagEvaluationsMode.FLAG_EVALUATIONS_ONLY,
+                ["other-distinct-id", "probe-distinct-id"],
+            ),
+            (
                 "mode_2_flag_calls_and_other_events",
                 {
                     "calls": "SELECT distinct_id FROM events WHERE event IN ('$feature_flag_called', '$pageview') "
@@ -975,6 +986,24 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
             self._create_view(name, body)
 
         assert [row[0] for row in self._query_events(query, mode=mode).results] == expected
+
+    def test_view_joined_through_a_warehouse_join_reads_its_flag_calls_from_flag_evaluations(self):
+        self._create_events_only_flag_call()
+        _create_event(team=self.team, event="$pageview", distinct_id="probe-distinct-id", timestamp=self.occurred_at)
+        flush_persons_and_events()
+        self._create_view("calls", "SELECT distinct_id FROM events WHERE event = '$feature_flag_called'")
+        DataWarehouseJoin.objects.create(
+            team=self.team,
+            source_table_name="events",
+            source_table_key="distinct_id",
+            joining_table_name="calls",
+            joining_table_key="distinct_id",
+            field_name="calls",
+        )
+
+        results = self._query_events("SELECT calls.distinct_id FROM events WHERE event = '$pageview'").results
+
+        assert [row[0] for row in results] == ["probe-distinct-id"]
 
     @parameterized.expand(
         [

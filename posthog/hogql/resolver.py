@@ -294,8 +294,8 @@ def resolve_types(
     resolver_factory: ResolverFactory | None = None,
     swap_flag_calls_in_views: bool = False,
 ) -> _T_AST:
-    """`node` with every type resolved. With `swap_flag_calls_in_views`, each saved view that `node` reads reads its
-    flag calls as `resolve_flag_calls_from_flag_evaluations` reads a query's."""
+    """`node` with every type resolved. With `swap_flag_calls_in_views`, the resolver runs
+    `resolve_flag_calls_from_flag_evaluations` on the body of each saved view that `node` reads."""
     if resolver_factory is None:
         resolver = Resolver(scopes=scopes, context=context, dialect=dialect)
     else:
@@ -1437,7 +1437,9 @@ class Resolver(CloningVisitor):
             return resolved
 
         chosen = resolve_flag_calls_from_flag_evaluations(body, self.context, resolve, view_name=view_name)
-        chosen_body = next(query for resolved, query in resolved_from if resolved is chosen)
+        chosen_body = next((query for resolved, query in resolved_from if resolved is chosen), None)
+        if chosen_body is None:
+            raise ImpossibleASTError("resolve_flag_calls_from_flag_evaluations must return a tree that resolve built")
         self._flag_call_view_bodies[key] = chosen_body
         return clone_expr(chosen_body)
 
