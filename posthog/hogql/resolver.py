@@ -1406,11 +1406,11 @@ class Resolver(CloningVisitor):
     ) -> ast.SelectQuery | ast.SelectSetQuery:
         """`body`, unresolved, with each `events` scan of flag calls that the swap accepts reading
         `posthog.flag_evaluations`. The swap checks the body as a query of its own."""
-        # The enclosing query's CTEs are in scope in the body, and the swap reads `FROM events` as the table.
+        # The enclosing query's CTEs are in scope in the body. The swap reads `FROM events` as the table.
         if not self.swap_flag_calls_in_views or "events" in self.ctes or not swaps_flag_calls(body, self.context):
             return body
         # Each resolve below visits the views that this body reads. Without the cache, each of those views would rerun
-        # its own swap, and a chain of views would cost twice as much at each level.
+        # its own swap. A chain of views would then cost twice as much at each level.
         key = (view_name, frozenset(self.ctes))
         cached = self._flag_call_view_bodies.get(key)
         if cached is not None:
@@ -1420,7 +1420,7 @@ class Resolver(CloningVisitor):
 
         def resolve(query: ast.SelectQuery | ast.SelectSetQuery) -> ast.SelectQuery | ast.SelectSetQuery:
             # The swap catches a resolution error and keeps the original body. A visit that raises leaves its scope
-            # and CTEs on this resolver, so they are restored here.
+            # and CTEs on this resolver, so this function restores them.
             scopes, ctes, view_depth, cte_counter = (
                 list(self.scopes),
                 self.ctes,

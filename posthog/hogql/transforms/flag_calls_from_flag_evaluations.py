@@ -138,13 +138,23 @@ def can_read_flag_evaluations(
 def swaps_flag_calls(node: ast.AST, context: HogQLContext) -> bool:
     """Whether `resolve_flag_calls_from_flag_evaluations` can change where `node` reads flag calls from. It reads
     only the context and the text of `node`, and it resolves nothing."""
+    database = _swap_database(context)
+    return database is not None and _swap_applies(node, context, database)
+
+
+def _swap_database(context: HogQLContext) -> "Database | None":
+    """The database when the context allows the swap, or None."""
     database = context.database
     if (
         not context.rewrite_flag_calls_to_flag_evaluations
         or database is None
         or not database.read_flag_calls_from_flag_evaluations
     ):
-        return False
+        return None
+    return database
+
+
+def _swap_applies(node: ast.AST, context: HogQLContext, database: "Database") -> bool:
     finder = _FlagCalledConstantFinder()
     finder.visit(node)
     if not finder.found:
@@ -174,37 +184,12 @@ def resolve_flag_calls_from_flag_evaluations(
       materialized column. See `_swap_reads_properties_alike`.
 
     The resolver runs this on the body of each saved view that it inlines, and `view_name` names that view for the
-    error. Once `events` gets no flag calls, a query raises when a view body it reads still reads only flag calls from
-    `events`.
+    error.
     """
-    database = context.database
-    if (
-        not context.rewrite_flag_calls_to_flag_evaluations
-        or database is None
-        or not database.read_flag_calls_from_flag_evaluations
-    ):
+    database = _swap_database(context)
+    if database is None or not _swap_applies(node, context, database):
         return resolve(node)
     only_in_flag_evaluations = database.flag_calls_only_in_flag_evaluations
-    resolved = _resolve_with_swaps(node, context, resolve, database, only_in_flag_evaluations, view_name)
-    if only_in_flag_evaluations:
-        view_reading_events = _view_reading_flag_calls_from_events(resolved)
-        if view_reading_events is not None:
-            raise _flag_calls_only_in_flag_evaluations_error(
-                f"it reads the saved view {view_reading_events}, which reads them from events", view_name
-            )
-    return resolved
-
-
-def _resolve_with_swaps(
-    node: _T_AST,
-    context: HogQLContext,
-    resolve: Callable[[_T_AST], _T_AST],
-    database: "Database",
-    only_in_flag_evaluations: bool,
-    view_name: str | None,
-) -> _T_AST:
-    if not swaps_flag_calls(node, context):
-        return resolve(node)
     with context.timings.measure("flag_calls_from_flag_evaluations"):
         rewritten = clone_expr(node)
         swapper = _EventsScanSwapper(
@@ -313,9 +298,6 @@ class _EventsScan:
 
     def column(self, expr: ast.Expr) -> list[str | int] | None:
         """The chain below the scan when `expr` reads it, such as `["event"]` or `["properties", "$feature_flag"]`."""
-        # The resolver wraps each field it resolves in a hidden alias, which the check of a resolved view body sees.
-        while isinstance(expr, ast.Alias) and expr.hidden:
-            expr = expr.expr
         if not isinstance(expr, ast.Field) or not expr.chain:
             return None
         if expr.chain[0] == self.alias and len(expr.chain) > 1:
@@ -939,43 +921,3 @@ class _PropertyReadCollector(_SyntaxVisitor):
         if column == "properties" and name == _FLAG_KEY_PROPERTY:
             return
         self.reads.append((column, name, field_type))
-
-
-def _view_reading_flag_calls_from_events(node: ast.AST) -> str | None:
-    """The name of a saved view whose inlined body reads only flag calls from `events`, or None."""
-    finder = _FlagCallViewFinder()
-    finder.visit(node)
-    return finder.found
-
-
-class _FlagCallViewFinder(_SyntaxVisitor):
-    def __init__(self) -> None:
-        super().__init__()
-        self.view: str | None = None
-        self.found: str | None = None
-
-    def visit_select_query(self, node: ast.SelectQuery) -> None:
-        outer = self.view
-        # The resolver names the view on the body's top SELECT only, so a SELECT nested in the body inherits it.
-        self.view = node.view_name or outer
-        if self.view is not None and self.found is None and _reads_only_flag_calls_from_events(node):
-            self.found = self.view
-        super().visit_select_query(node)
-        self.view = outer
-
-
-def _reads_only_flag_calls_from_events(node: ast.SelectQuery) -> bool:
-    scan = _EventsScan.of(node, lambda: True)
-    return (
-        scan is not None
-        and _reads_events_table(scan.join)
-        and scan.pins_flag_calls(_filter_conjuncts(node), needs_flag_key=False)
-    )
-
-
-def _reads_events_table(join: ast.JoinExpr) -> bool:
-    """Whether a resolved FROM reads the events table, rather than a CTE named `events`."""
-    table_type = join.type
-    while isinstance(table_type, (ast.TableAliasType, ast.ColumnAliasedTableType)):
-        table_type = table_type.table_type
-    return isinstance(table_type, ast.TableType) and isinstance(table_type.table, EventsTable)
