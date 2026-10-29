@@ -135,8 +135,25 @@ def can_read_flag_evaluations(
     )
 
 
+def swaps_flag_calls(node: ast.AST, context: HogQLContext) -> bool:
+    """Whether `resolve_flag_calls_from_flag_evaluations` can change where `node` reads flag calls from. It reads
+    only the context and the text of `node`, and it resolves nothing."""
+    database = context.database
+    if (
+        not context.rewrite_flag_calls_to_flag_evaluations
+        or database is None
+        or not database.read_flag_calls_from_flag_evaluations
+    ):
+        return False
+    finder = _FlagCalledConstantFinder()
+    finder.visit(node)
+    if not finder.found:
+        return False
+    return database.flag_calls_only_in_flag_evaluations or not context.uses_new_events_schema()
+
+
 def resolve_flag_calls_from_flag_evaluations(
-    node: _T_AST, context: HogQLContext, resolve: Callable[[_T_AST], _T_AST]
+    node: _T_AST, context: HogQLContext, resolve: Callable[[_T_AST], _T_AST], *, view_name: str | None = None
 ) -> _T_AST:
     """`node` resolved with `resolve`, with each `events` scan that `can_read_flag_evaluations` accepts reading
     `posthog.flag_evaluations` instead.
@@ -156,8 +173,9 @@ def resolve_flag_calls_from_flag_evaluations(
     - A query keeps reading `events` when it reads a property from a different kind of column there, such as a
       materialized column. See `_swap_reads_properties_alike`.
 
-    The resolver inlines a saved view's body, so the swap never sees a scan inside one. Once `events` gets no flag
-    calls, a query that reads a view whose body reads only flag calls from `events` raises.
+    The resolver runs this on the body of each saved view that it inlines, and `view_name` names that view for the
+    error. Once `events` gets no flag calls, a query raises when a view body it reads still reads only flag calls from
+    `events`.
     """
     database = context.database
     if (
@@ -167,12 +185,12 @@ def resolve_flag_calls_from_flag_evaluations(
     ):
         return resolve(node)
     only_in_flag_evaluations = database.flag_calls_only_in_flag_evaluations
-    resolved = _resolve_with_swaps(node, context, resolve, database, only_in_flag_evaluations)
+    resolved = _resolve_with_swaps(node, context, resolve, database, only_in_flag_evaluations, view_name)
     if only_in_flag_evaluations:
-        view_name = _view_reading_flag_calls_from_events(resolved)
-        if view_name is not None:
+        view_reading_events = _view_reading_flag_calls_from_events(resolved)
+        if view_reading_events is not None:
             raise _flag_calls_only_in_flag_evaluations_error(
-                f"it reads the saved view {view_name}, which reads them from events"
+                f"it reads the saved view {view_reading_events}, which reads them from events", view_name
             )
     return resolved
 
@@ -183,12 +201,9 @@ def _resolve_with_swaps(
     resolve: Callable[[_T_AST], _T_AST],
     database: "Database",
     only_in_flag_evaluations: bool,
+    view_name: str | None,
 ) -> _T_AST:
-    finder = _FlagCalledConstantFinder()
-    finder.visit(node)
-    if not finder.found:
-        return resolve(node)
-    if not only_in_flag_evaluations and context.uses_new_events_schema():
+    if not swaps_flag_calls(node, context):
         return resolve(node)
     with context.timings.measure("flag_calls_from_flag_evaluations"):
         rewritten = clone_expr(node)
@@ -202,7 +217,7 @@ def _resolve_with_swaps(
         swapper.visit(rewritten)
     if swapper.refusals:
         if only_in_flag_evaluations:
-            raise _flag_calls_only_in_flag_evaluations_error(swapper.refusals[0])
+            raise _flag_calls_only_in_flag_evaluations_error(swapper.refusals[0], view_name)
         logger.info("flag_calls_swap_declined", team_id=context.team_id, reason=swapper.refusals[0])
     original = resolve(node)
     if not swapper.swapped:
@@ -221,7 +236,7 @@ def _resolve_with_swaps(
             return swapped
     if only_in_flag_evaluations:
         # events gets no new flag calls, so the original query would return only calls from before the move.
-        raise _flag_calls_only_in_flag_evaluations_error(reason)
+        raise _flag_calls_only_in_flag_evaluations_error(reason, view_name)
     logger.info("flag_calls_swap_declined", team_id=context.team_id, reason=reason)
     return original
 
@@ -237,10 +252,11 @@ def _flag_key_compares_as_string(context: HogQLContext) -> bool:
     return metadata.event_properties.get(_FLAG_KEY_PROPERTY, {}).get("type") in (None, "String")
 
 
-def _flag_calls_only_in_flag_evaluations_error(reason: str) -> QueryError:
+def _flag_calls_only_in_flag_evaluations_error(reason: str, view_name: str | None) -> QueryError:
+    subject, part = ("this query", "query") if view_name is None else (f"the view {view_name}", "view")
     return QueryError(
-        f"Your organization's {FLAG_CALLED_EVENT} events are only in posthog.flag_evaluations, and this query "
-        f"can't read them there because {reason}. Change that part of the query, or query "
+        f"Your organization's {FLAG_CALLED_EVENT} events are only in posthog.flag_evaluations, and {subject} "
+        f"can't read them there because {reason}. Change that part of the {part}, or query "
         "posthog.flag_evaluations directly."
     )
 

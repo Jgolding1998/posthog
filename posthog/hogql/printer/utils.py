@@ -268,6 +268,7 @@ def prepare_ast_for_printing(
             dialect=dialect,
             scopes=[scope.type for scope in stack if scope.type is not None] if stack else None,
             resolver_factory=resolver_factory,
+            swap_flag_calls_in_views=dialect == "clickhouse",
         )
         if dialect == "clickhouse":
             node = resolve_flag_calls_from_flag_evaluations(node, context, resolve)

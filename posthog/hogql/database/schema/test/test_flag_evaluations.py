@@ -886,6 +886,110 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
         create_person(team=self.team, distinct_ids=["events-distinct-id"])
         flush_persons_and_events()
 
+    def _create_view(self, name: str, query: str) -> None:
+        DataWarehouseSavedQuery.objects.create(
+            team=self.team, name=name, query={"kind": "HogQLQuery", "query": query}, columns={"distinct_id": "String"}
+        )
+
+    @parameterized.expand(
+        [
+            (
+                "mode_1_inside_coverage",
+                {"calls": f"SELECT distinct_id FROM events WHERE {FLAG_CALL_CONJUNCTS}"},
+                "SELECT distinct_id FROM calls",
+                FlagEvaluationsMode.READ_FLAG_EVALUATIONS,
+                ["probe-distinct-id"],
+            ),
+            (
+                "mode_1_without_coverage",
+                {"calls": "SELECT distinct_id FROM events WHERE event = '$feature_flag_called'"},
+                "SELECT distinct_id FROM calls",
+                FlagEvaluationsMode.READ_FLAG_EVALUATIONS,
+                ["events-distinct-id"],
+            ),
+            (
+                "mode_1_swapped_body_fails_to_resolve",
+                {
+                    "calls": "SELECT distinct_id, goe_0.properties AS group_properties FROM events "
+                    f"WHERE {FLAG_CALL_CONJUNCTS}"
+                },
+                "SELECT distinct_id FROM calls",
+                FlagEvaluationsMode.READ_FLAG_EVALUATIONS,
+                ["events-distinct-id"],
+            ),
+            (
+                "mode_2_without_coverage",
+                {"calls": "SELECT distinct_id FROM events WHERE event = '$feature_flag_called'"},
+                "SELECT distinct_id FROM calls",
+                FlagEvaluationsMode.FLAG_EVALUATIONS_ONLY,
+                ["probe-distinct-id"],
+            ),
+            (
+                "mode_2_view_of_a_view",
+                {
+                    "calls": "SELECT distinct_id FROM events WHERE event = '$feature_flag_called'",
+                    "calls_of_calls": "SELECT distinct_id FROM calls",
+                },
+                "SELECT distinct_id FROM calls_of_calls",
+                FlagEvaluationsMode.FLAG_EVALUATIONS_ONLY,
+                ["probe-distinct-id"],
+            ),
+            (
+                "mode_2_flag_calls_and_other_events",
+                {
+                    "calls": "SELECT distinct_id FROM events WHERE event IN ('$feature_flag_called', '$pageview') "
+                    "AND timestamp >= now() - INTERVAL 7 DAY"
+                },
+                "SELECT distinct_id FROM calls",
+                FlagEvaluationsMode.FLAG_EVALUATIONS_ONLY,
+                ["events-distinct-id"],
+            ),
+            (
+                "mode_2_body_with_a_cte_named_events",
+                {
+                    "calls": "WITH events AS (SELECT distinct_id, event FROM posthog.flag_evaluations) "
+                    "SELECT distinct_id FROM events WHERE event = '$feature_flag_called'"
+                },
+                "SELECT distinct_id FROM calls",
+                FlagEvaluationsMode.FLAG_EVALUATIONS_ONLY,
+                ["probe-distinct-id"],
+            ),
+            (
+                "mode_2_under_an_enclosing_cte_named_events",
+                {"calls": "SELECT distinct_id FROM events WHERE event = '$feature_flag_called'"},
+                "WITH events AS (SELECT distinct_id, event FROM posthog.flag_evaluations) SELECT distinct_id FROM calls",
+                FlagEvaluationsMode.FLAG_EVALUATIONS_ONLY,
+                ["probe-distinct-id"],
+            ),
+        ]
+    )
+    def test_view_reads_its_flag_calls_as_a_query_of_its_own_would(
+        self, _name: str, views: dict[str, str], query: str, mode: FlagEvaluationsMode, expected: list[str]
+    ):
+        self._create_events_only_flag_call()
+        for name, body in views.items():
+            self._create_view(name, body)
+
+        assert [row[0] for row in self._query_events(query, mode=mode).results] == expected
+
+    @parameterized.expand(
+        [
+            ("select_star", "SELECT * FROM events WHERE event = '$feature_flag_called'", "it selects \\* or COLUMNS"),
+            (
+                "event_time_group_properties",
+                f"SELECT distinct_id, goe_0.properties FROM events WHERE {FLAG_CALL_CONJUNCTS}",
+                "it reads something that table doesn't have",
+            ),
+        ]
+    )
+    def test_view_flag_evaluations_cannot_answer_raises_an_error_that_names_the_view(
+        self, _name: str, body: str, reason: str
+    ):
+        self._create_view("calls", body)
+
+        with self.assertRaisesRegex(QueryError, f"the view calls can't read them there because {reason}"):
+            self._query_events("SELECT distinct_id FROM calls")
+
     @parameterized.expand(
         [
             ("string", "variant-a"),
@@ -1107,41 +1211,6 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
         assert rewritten.results == from_events.results
         assert rewritten.clickhouse is not None
         assert ("FROM flag_evaluations" in rewritten.clickhouse) is swaps
-
-    @parameterized.expand(
-        [
-            ("flag_calls", f"SELECT uuid FROM events WHERE {FLAG_CALL_CONJUNCTS}", "saved_calls"),
-            ("view_of_a_flag_call_view", "SELECT uuid FROM inner_calls", "inner_calls"),
-            ("pageviews", f"SELECT uuid FROM events WHERE {PAGEVIEW_CONJUNCTS}", None),
-            (
-                "cte_named_events",
-                "WITH events AS (SELECT uuid, event, properties, timestamp FROM posthog.flag_evaluations) "
-                f"SELECT uuid FROM events WHERE {FLAG_CALL_CONJUNCTS}",
-                None,
-            ),
-        ]
-    )
-    def test_view_that_reads_flag_calls_from_events_raises_once_events_gets_no_flag_calls(
-        self, _name: str, view_query: str, failing_view: str | None
-    ):
-        DataWarehouseSavedQuery.objects.create(
-            team=self.team,
-            name="inner_calls",
-            query={"query": f"SELECT uuid FROM events WHERE {FLAG_CALL_CONJUNCTS}"},
-            columns={"uuid": "String"},
-        )
-        DataWarehouseSavedQuery.objects.create(
-            team=self.team, name="saved_calls", query={"query": view_query}, columns={"uuid": "String"}
-        )
-        query = "SELECT count() FROM saved_calls"
-
-        # events still gets flag calls on mode 1, so the view's read of events is complete.
-        self._query_events(query, mode=FlagEvaluationsMode.READ_FLAG_EVALUATIONS)
-        if failing_view is None:
-            self._query_events(query)
-            return
-        with self.assertRaisesRegex(QueryError, f"reads the saved view {failing_view}, which reads them from events"):
-            self._query_events(query)
 
     def test_flag_call_query_on_events_prints_a_read_of_flag_evaluations(self):
         self.assertQueryMatchesSnapshot(self._query_events(FLAG_CALLS_ON_EVENTS).clickhouse)

@@ -69,6 +69,10 @@ from posthog.hogql.resolver_utils import (
     suggest_field_names,
     suggested_field_fix,
 )
+from posthog.hogql.transforms.flag_calls_from_flag_evaluations import (
+    resolve_flag_calls_from_flag_evaluations,
+    swaps_flag_calls,
+)
 from posthog.hogql.transforms.trino.persons import (
     lower_trino_table,
     resolve_internal_trino_logical_table,
@@ -288,11 +292,15 @@ def resolve_types(
     dialect: HogQLDialect,
     scopes: Optional[list[ast.SelectQueryType]] = None,
     resolver_factory: ResolverFactory | None = None,
+    swap_flag_calls_in_views: bool = False,
 ) -> _T_AST:
+    """`node` with every type resolved. With `swap_flag_calls_in_views`, each saved view that `node` reads reads its
+    flag calls as `resolve_flag_calls_from_flag_evaluations` reads a query's."""
     if resolver_factory is None:
         resolver = Resolver(scopes=scopes, context=context, dialect=dialect)
     else:
         resolver = resolver_factory(context, dialect, scopes)
+    resolver.swap_flag_calls_in_views = swap_flag_calls_in_views
     return resolver.visit(node)
 
 
@@ -442,6 +450,7 @@ class Resolver(CloningVisitor):
         self.scopes: list[ast.SelectQueryType] = scopes or []
         self.ctes: dict[str, ast.CTE] = {}
         self.current_view_depth: int = 0
+        self.swap_flag_calls_in_views = False
         self.context = context
         self.dialect = dialect
         self.database = context.database
@@ -1390,6 +1399,37 @@ class Resolver(CloningVisitor):
 
         return aliased_fields
 
+    def _swap_flag_calls_in_view_body(
+        self, body: ast.SelectQuery | ast.SelectSetQuery, view_name: str
+    ) -> ast.SelectQuery | ast.SelectSetQuery:
+        """`body`, unresolved, with each `events` scan of flag calls that the swap accepts reading
+        `posthog.flag_evaluations`. The swap checks the body as a query of its own."""
+        # The enclosing query's CTEs are in scope in the body, and the swap reads `FROM events` as the table.
+        if not self.swap_flag_calls_in_views or "events" in self.ctes or not swaps_flag_calls(body, self.context):
+            return body
+        resolved_from: list[tuple[ast.SelectQuery | ast.SelectSetQuery, ast.SelectQuery | ast.SelectSetQuery]] = []
+
+        def resolve(query: ast.SelectQuery | ast.SelectSetQuery) -> ast.SelectQuery | ast.SelectSetQuery:
+            # The swap catches a resolution error and keeps the original body. A visit that raises leaves its scope
+            # and CTEs on this resolver, so they are restored here.
+            scopes, ctes, view_depth, cte_counter = (
+                list(self.scopes),
+                self.ctes,
+                self.current_view_depth,
+                self.cte_counter,
+            )
+            try:
+                # Resolving inlines nested views into the tree it visits, and the caller visits the chosen body again.
+                resolved = self.visit(clone_expr(query))
+            finally:
+                self.scopes[:] = scopes
+                self.ctes, self.current_view_depth, self.cte_counter = ctes, view_depth, cte_counter
+            resolved_from.append((resolved, query))
+            return resolved
+
+        chosen = resolve_flag_calls_from_flag_evaluations(body, self.context, resolve, view_name=view_name)
+        return next(query for resolved, query in resolved_from if resolved is chosen)
+
     def visit_join_expr(self, node: ast.JoinExpr):
         """Visit each FROM and JOIN table or subquery."""
 
@@ -1485,8 +1525,9 @@ class Resolver(CloningVisitor):
             if isinstance(database_table, SavedQuery):
                 self.current_view_depth += 1
 
-                node.table = parse_select(str(database_table.query))
-                _mark_view_body(node.table, database_table.name)
+                view_body = parse_select(str(database_table.query))
+                _mark_view_body(view_body, database_table.name)
+                node.table = self._swap_flag_calls_in_view_body(view_body, database_table.name)
 
                 node.alias = table_alias or database_table.name
                 node = self.visit(node)
