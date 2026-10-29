@@ -1070,7 +1070,6 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
         ]
 
     def test_views_that_pin_the_flag_key_look_up_its_type_once_per_query(self):
-        self._create_events_only_flag_call()
         for name in ("calls_a", "calls_b"):
             self._create_view(name, f"SELECT distinct_id FROM events WHERE {FLAG_CALL_CONJUNCTS}")
 

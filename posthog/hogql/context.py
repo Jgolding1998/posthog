@@ -176,7 +176,7 @@ class HogQLContext:
     # flag-call subquery in a deletion predicate keeps reading `events` whatever the organization's mode.
     rewrite_flag_calls_to_flag_evaluations: bool = True
     # Per-query result of that transform's `$feature_flag` property-type lookup. The transform runs once for the
-    # query and once for each saved view the query inlines, so this keeps the lookup to one Postgres read.
+    # query and once for each saved view the query inlines, so this runs the lookup once per query.
     # None means the lookup has not run.
     flag_key_compares_as_string: Optional[bool] = field(default=None, compare=False, repr=False)
 
