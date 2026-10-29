@@ -292,16 +292,29 @@ def resolve_types(
     dialect: HogQLDialect,
     scopes: Optional[list[ast.SelectQueryType]] = None,
     resolver_factory: ResolverFactory | None = None,
-    swap_flag_calls_in_views: bool = False,
 ) -> _T_AST:
-    """`node` with every type resolved. With `swap_flag_calls_in_views`, the resolver runs
-    `resolve_flag_calls_from_flag_evaluations` on the body of each saved view that `node` reads."""
     if resolver_factory is None:
         resolver = Resolver(scopes=scopes, context=context, dialect=dialect)
     else:
         resolver = resolver_factory(context, dialect, scopes)
-    resolver.swap_flag_calls_in_views = swap_flag_calls_in_views
     return resolver.visit(node)
+
+
+def swapping_flag_calls_in_views(resolver_factory: ResolverFactory | None) -> ResolverFactory:
+    """A factory whose resolvers run `resolve_flag_calls_from_flag_evaluations` on the body of each saved view they
+    inline. Each resolver is otherwise the one `resolver_factory` builds."""
+
+    def factory(
+        context: HogQLContext, dialect: HogQLDialect, scopes: Optional[list[ast.SelectQueryType]]
+    ) -> "Resolver":
+        if resolver_factory is None:
+            resolver = Resolver(scopes=scopes, context=context, dialect=dialect)
+        else:
+            resolver = resolver_factory(context, dialect, scopes)
+        resolver.swap_flag_calls_in_views = True
+        return resolver
+
+    return factory
 
 
 def _select_type_columns(
