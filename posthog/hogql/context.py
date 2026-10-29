@@ -177,7 +177,6 @@ class HogQLContext:
     rewrite_flag_calls_to_flag_evaluations: bool = True
     # Per-query result of that transform's `$feature_flag` property-type lookup. The transform runs once for the
     # query and once for each saved view the query inlines, so this runs the lookup once per query.
-    # None means the lookup has not run.
     flag_key_compares_as_string: Optional[bool] = field(default=None, compare=False, repr=False)
 
     # Backend-only opt-in for transforms/events_read_in_order.py. The prefix is slower when the range is short or

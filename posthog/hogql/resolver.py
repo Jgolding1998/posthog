@@ -1431,7 +1431,6 @@ class Resolver(CloningVisitor):
         key = (view_name, frozenset((name, cte.expr.to_hogql()) for name, cte in self.ctes.items()))
         cached = self._flag_call_view_bodies.get(key)
         if cached is not None:
-            # The visit that follows replaces each nested view reference in the body it visits.
             return clone_expr(cached)
         resolved_from: list[tuple[ast.SelectQuery | ast.SelectSetQuery, ast.SelectQuery | ast.SelectSetQuery]] = []
 
@@ -1445,7 +1444,6 @@ class Resolver(CloningVisitor):
                 self.cte_counter,
             )
             try:
-                # Resolving inlines nested views into the tree it visits, and the caller visits the chosen body again.
                 resolved = self.visit(clone_expr(query))
             finally:
                 self.scopes[:] = scopes
