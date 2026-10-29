@@ -451,6 +451,8 @@ class Resolver(CloningVisitor):
         self.ctes: dict[str, ast.CTE] = {}
         self.current_view_depth: int = 0
         self.swap_flag_calls_in_views = False
+        # The unresolved body that the flag call swap chose for each view, by the CTE names in scope where it was read.
+        self._flag_call_view_bodies: dict[tuple[str, frozenset[str]], ast.SelectQuery | ast.SelectSetQuery] = {}
         self.context = context
         self.dialect = dialect
         self.database = context.database
@@ -1407,6 +1409,13 @@ class Resolver(CloningVisitor):
         # The enclosing query's CTEs are in scope in the body, and the swap reads `FROM events` as the table.
         if not self.swap_flag_calls_in_views or "events" in self.ctes or not swaps_flag_calls(body, self.context):
             return body
+        # Each resolve below visits the views that this body reads. Without the cache, each of those views would rerun
+        # its own swap, and a chain of views would cost twice as much at each level.
+        key = (view_name, frozenset(self.ctes))
+        cached = self._flag_call_view_bodies.get(key)
+        if cached is not None:
+            # The visit that follows replaces each nested view reference in the body it visits.
+            return clone_expr(cached)
         resolved_from: list[tuple[ast.SelectQuery | ast.SelectSetQuery, ast.SelectQuery | ast.SelectSetQuery]] = []
 
         def resolve(query: ast.SelectQuery | ast.SelectSetQuery) -> ast.SelectQuery | ast.SelectSetQuery:
@@ -1428,7 +1437,9 @@ class Resolver(CloningVisitor):
             return resolved
 
         chosen = resolve_flag_calls_from_flag_evaluations(body, self.context, resolve, view_name=view_name)
-        return next(query for resolved, query in resolved_from if resolved is chosen)
+        chosen_body = next(query for resolved, query in resolved_from if resolved is chosen)
+        self._flag_call_view_bodies[key] = chosen_body
+        return clone_expr(chosen_body)
 
     def visit_join_expr(self, node: ast.JoinExpr):
         """Visit each FROM and JOIN table or subquery."""

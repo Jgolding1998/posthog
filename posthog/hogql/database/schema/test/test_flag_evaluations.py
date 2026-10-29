@@ -41,6 +41,7 @@ from posthog.hogql.database.schema.util.where_clause_extractor import SESSION_BU
 from posthog.hogql.errors import QueryError
 from posthog.hogql.property import property_to_expr
 from posthog.hogql.query import execute_hogql_query
+from posthog.hogql.transforms.flag_calls_from_flag_evaluations import resolve_flag_calls_from_flag_evaluations
 from posthog.hogql.utils import is_json_verbatim
 
 from posthog.clickhouse.client import sync_execute
@@ -886,9 +887,12 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
         create_person(team=self.team, distinct_ids=["events-distinct-id"])
         flush_persons_and_events()
 
-    def _create_view(self, name: str, query: str) -> None:
+    def _create_view(self, name: str, query: str, columns: tuple[str, ...] = ("distinct_id",)) -> None:
         DataWarehouseSavedQuery.objects.create(
-            team=self.team, name=name, query={"kind": "HogQLQuery", "query": query}, columns={"distinct_id": "String"}
+            team=self.team,
+            name=name,
+            query={"kind": "HogQLQuery", "query": query},
+            columns=dict.fromkeys(columns, "String"),
         )
 
     @parameterized.expand(
@@ -989,6 +993,32 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
 
         with self.assertRaisesRegex(QueryError, f"the view calls can't read them there because {reason}"):
             self._query_events("SELECT distinct_id FROM calls")
+
+    def test_chain_of_flag_call_views_runs_the_swap_once_per_view(self):
+        self._create_events_only_flag_call()
+        self._create_view(
+            "calls_0",
+            "SELECT distinct_id, event FROM events WHERE event = '$feature_flag_called'",
+            ("distinct_id", "event"),
+        )
+        for level in range(1, 4):
+            self._create_view(
+                f"calls_{level}",
+                f"SELECT distinct_id, event FROM calls_{level - 1} WHERE event = '$feature_flag_called'",
+                ("distinct_id", "event"),
+            )
+
+        with patch(
+            "posthog.hogql.resolver.resolve_flag_calls_from_flag_evaluations",
+            wraps=resolve_flag_calls_from_flag_evaluations,
+        ) as swap:
+            results = self._query_events("SELECT distinct_id FROM calls_3").results
+
+        assert [row[0] for row in results] == ["probe-distinct-id"]
+        # Each extra resolve of a view body would otherwise rerun the swap on every view below it.
+        assert sorted(call.kwargs["view_name"] for call in swap.call_args_list) == [
+            f"calls_{level}" for level in range(4)
+        ]
 
     @parameterized.expand(
         [
