@@ -451,8 +451,13 @@ class Resolver(CloningVisitor):
         self.ctes: dict[str, ast.CTE] = {}
         self.current_view_depth: int = 0
         self.swap_flag_calls_in_views = False
-        # The unresolved body that the flag call swap chose for each view, by the CTE names in scope where it was read.
-        self._flag_call_view_bodies: dict[tuple[str, frozenset[str]], ast.SelectQuery | ast.SelectSetQuery] = {}
+        # The unresolved body that the flag call swap chose for each view, by the CTEs in scope where it was read. A
+        # CTE's body can change the swap's decision, so the key holds each CTE's identity. Each entry keeps its CTEs
+        # alive, so no other CTE can take their ids.
+        self._flag_call_view_bodies: dict[
+            tuple[str, frozenset[tuple[str, int]]],
+            tuple[list[ast.CTE], ast.SelectQuery | ast.SelectSetQuery],
+        ] = {}
         self.context = context
         self.dialect = dialect
         self.database = context.database
@@ -1411,11 +1416,11 @@ class Resolver(CloningVisitor):
             return body
         # Each resolve below visits the views that this body reads. Without the cache, each of those views would rerun
         # its own swap. A chain of views would then cost twice as much at each level.
-        key = (view_name, frozenset(self.ctes))
+        key = (view_name, frozenset((name, id(cte)) for name, cte in self.ctes.items()))
         cached = self._flag_call_view_bodies.get(key)
         if cached is not None:
             # The visit that follows replaces each nested view reference in the body it visits.
-            return clone_expr(cached)
+            return clone_expr(cached[1])
         resolved_from: list[tuple[ast.SelectQuery | ast.SelectSetQuery, ast.SelectQuery | ast.SelectSetQuery]] = []
 
         def resolve(query: ast.SelectQuery | ast.SelectSetQuery) -> ast.SelectQuery | ast.SelectSetQuery:
@@ -1440,7 +1445,7 @@ class Resolver(CloningVisitor):
         chosen_body = next((query for resolved, query in resolved_from if resolved is chosen), None)
         if chosen_body is None:
             raise ImpossibleASTError("resolve_flag_calls_from_flag_evaluations must return a tree that resolve built")
-        self._flag_call_view_bodies[key] = chosen_body
+        self._flag_call_view_bodies[key] = (list(self.ctes.values()), chosen_body)
         return clone_expr(chosen_body)
 
     def visit_join_expr(self, node: ast.JoinExpr):

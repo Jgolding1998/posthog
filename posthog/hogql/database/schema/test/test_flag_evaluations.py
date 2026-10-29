@@ -1023,6 +1023,22 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
         with self.assertRaisesRegex(QueryError, f"the view calls can't read them there because {reason}"):
             self._query_events("SELECT distinct_id FROM calls")
 
+    def test_view_read_under_a_cte_with_the_same_name_and_another_body_decides_its_swap_again(self):
+        self._create_view(
+            "calls",
+            "SELECT distinct_id, flag_key AS fk FROM events WHERE event = '$feature_flag_called'",
+            ("distinct_id", "fk"),
+        )
+        # The first branch's CTE reads flag_evaluations, so the swap keeps the binding of flag_key. The second
+        # branch's CTE is a constant, so the swap there would read the flag_key column instead.
+        query = (
+            "WITH (SELECT flag_key FROM posthog.flag_evaluations LIMIT 1) AS flag_key SELECT fk FROM calls "
+            "UNION ALL WITH 'sentinel' AS flag_key SELECT fk FROM calls"
+        )
+
+        with self.assertRaisesRegex(QueryError, "the view calls can't read them there because a name in it"):
+            self._query_events(query)
+
     def test_chain_of_flag_call_views_runs_the_swap_once_per_view(self):
         self._create_events_only_flag_call()
         self._create_view(
