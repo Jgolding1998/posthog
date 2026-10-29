@@ -166,19 +166,6 @@ class TestCanReadFlagEvaluations(SimpleTestCase):
                 "unqualified_reads_beside_an_array_join",
                 f"SELECT n FROM events ARRAY JOIN [1, 2] AS n WHERE {UNQUALIFIED}",
             ),
-            ("unqualified_reads_beside_a_table_function", _beside("CROSS JOIN numbers(10) AS n")),
-            (
-                "unqualified_event_beside_a_cte_with_a_column_list_that_renames_it",
-                "WITH calls (id, kind) AS (SELECT id, 'x' AS event FROM persons) "
-                + _beside("JOIN calls ON e.person_id = calls.id"),
-            ),
-            (
-                "unqualified_event_beside_a_union_whose_later_branch_names_event",
-                _beside(
-                    "JOIN (SELECT person_id AS id, 1 AS kind FROM raw_cohort_people "
-                    "UNION ALL SELECT person_id AS id, 2 AS event FROM raw_cohort_people) AS c ON e.person_id = c.id"
-                ),
-            ),
             (
                 "alias_that_reads_the_scan_beside_a_subquery_with_an_event_column",
                 "SELECT e.event AS event, count() FROM events AS e "

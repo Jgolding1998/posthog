@@ -13,6 +13,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from functools import cache, partial
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
@@ -33,6 +34,9 @@ from posthog.hogql.visitor import TraversingVisitor, clone_expr
 
 from posthog.dataclasses import frozen
 from posthog.date_util import start_of_day
+
+if TYPE_CHECKING:
+    from posthog.hogql.database.database import Database
 
 logger = structlog.get_logger(__name__)
 
@@ -264,22 +268,15 @@ def _other_table_names(node: ast.SelectQuery, ctes: Iterable[str]) -> frozenset[
     scan column: the other sources' names in FROM, and the CTEs in scope. Some warehouse tables match a name in
     any case."""
     names = {name.lower() for name in ctes}
-    for join in _other_joins(node):
+    join = node.select_from.next_join if node.select_from is not None else None
+    while join is not None:
         if join.alias:
             names.add(join.alias.lower())
         elif isinstance(join.table, ast.Field):
             # The resolver names an unaliased joined table by joining its chain with "__".
             names.add("__".join(str(part) for part in join.table.chain).lower())
-    return frozenset(names)
-
-
-def _other_joins(node: ast.SelectQuery) -> list[ast.JoinExpr]:
-    joins = []
-    join = node.select_from.next_join if node.select_from is not None else None
-    while join is not None:
-        joins.append(join)
         join = join.next_join
-    return joins
+    return frozenset(names)
 
 
 class _EventsScan:
@@ -301,7 +298,7 @@ class _EventsScan:
         cls,
         node: ast.SelectQuery,
         flag_key_compares_as_string: Callable[[], bool],
-        ctes: Iterable[str] = (),
+        ctes: Iterable[str],
     ) -> "_EventsScan | None":
         """The `events` scan in `node`'s FROM. `ctes` are the names of the CTEs in scope for `node`."""
         join = node.select_from
