@@ -810,8 +810,8 @@ class FlagCallReads:
 
 
 def batch_flag_call_reads(cohort: Cohort, team: Team) -> FlagCallReads:
-    """Whether the flag_evaluations rewrite is on for the team, and how many flag-call reads the batch query for this
-    cohort leaves on events.
+    """Whether the flag_evaluations rewrite is on for the team, whether the organization's flag calls are only in
+    flag_evaluations, and how many flag-call reads the batch query for this cohort leaves on events.
 
     It compiles the cohort the way the batch calculation does, so it follows the rewrite's rules, its rollout gate,
     and its fallback to events when a field doesn't resolve on flag_evaluations. It raises whatever the compile raises.
