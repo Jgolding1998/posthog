@@ -298,7 +298,7 @@ class _EventsScan:
         cls,
         node: ast.SelectQuery,
         flag_key_compares_as_string: Callable[[], bool],
-        ctes: Iterable[str],
+        ctes: Iterable[str] = (),
     ) -> "_EventsScan | None":
         """The `events` scan in `node`'s FROM. `ctes` are the names of the CTEs in scope for `node`."""
         join = node.select_from
