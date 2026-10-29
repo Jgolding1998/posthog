@@ -978,6 +978,7 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
             ),
         ]
     )
+    @override_settings(CLICKHOUSE_HOGQL_USE_NEW_EVENTS_SCHEMA=False)
     def test_view_reads_its_flag_calls_as_a_query_of_its_own_would(
         self, _name: str, views: dict[str, str], query: str, mode: FlagEvaluationsMode, expected: list[str]
     ):
@@ -1049,6 +1050,8 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
         for level in range(1, 4):
             self._create_view(
                 f"calls_{level}",
+                # The resolver builds a new node for a body's CTE on each visit of that body.
+                f"WITH one AS (SELECT 1 AS one) "
                 f"SELECT distinct_id, event FROM calls_{level - 1} WHERE event = '$feature_flag_called'",
                 ("distinct_id", "event"),
             )
