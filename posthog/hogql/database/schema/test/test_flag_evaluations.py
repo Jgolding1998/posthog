@@ -40,6 +40,7 @@ from posthog.hogql.database.schema.flag_evaluations import add_events_list_field
 from posthog.hogql.database.schema.util.where_clause_extractor import SESSION_BUFFER_DAYS
 from posthog.hogql.errors import QueryError
 from posthog.hogql.property import property_to_expr
+from posthog.hogql.property_metadata import load_property_metadata
 from posthog.hogql.query import execute_hogql_query
 from posthog.hogql.transforms.flag_calls_from_flag_evaluations import resolve_flag_calls_from_flag_evaluations
 from posthog.hogql.utils import is_json_verbatim
@@ -1067,6 +1068,21 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
         assert sorted(call.kwargs["view_name"] for call in swap.call_args_list) == [
             f"calls_{level}" for level in range(4)
         ]
+
+    def test_views_that_pin_the_flag_key_look_up_its_type_once_per_query(self):
+        self._create_events_only_flag_call()
+        for name in ("calls_a", "calls_b"):
+            self._create_view(name, f"SELECT distinct_id FROM events WHERE {FLAG_CALL_CONJUNCTS}")
+
+        # In mode 2 the flag key's type lookup is the transform's only property metadata read.
+        with patch(
+            "posthog.hogql.transforms.flag_calls_from_flag_evaluations.load_property_metadata",
+            wraps=load_property_metadata,
+        ) as lookup:
+            results = self._query_events("SELECT distinct_id FROM calls_a UNION ALL SELECT distinct_id FROM calls_b")
+
+        assert [row[0] for row in results.results] == ["probe-distinct-id", "probe-distinct-id"]
+        assert lookup.call_count == 1
 
     @parameterized.expand(
         [

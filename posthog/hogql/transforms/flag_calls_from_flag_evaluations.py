@@ -12,7 +12,7 @@ import json
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
-from functools import cache, partial
+from functools import partial
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -198,7 +198,7 @@ def resolve_flag_calls_from_flag_evaluations(
             timezone=ZoneInfo(database.get_timezone()),
             only_in_flag_evaluations=only_in_flag_evaluations,
             # The lookup reads Postgres, so it runs only when a scan pins `$feature_flag`.
-            flag_key_compares_as_string=cache(partial(_flag_key_compares_as_string, context)),
+            flag_key_compares_as_string=partial(_flag_key_compares_as_string, context),
         )
         swapper.visit(rewritten)
     if swapper.refusals:
@@ -232,10 +232,13 @@ def _flag_key_compares_as_string(context: HogQLContext) -> bool:
     property definitions type as Boolean, Numeric or DateTime before it compares the value."""
     if context.team_id is None:
         return True
-    metadata = load_property_metadata(
-        context, event_property_names={_FLAG_KEY_PROPERTY}, person_property_names=set(), group_property_names={}
-    )
-    return metadata.event_properties.get(_FLAG_KEY_PROPERTY, {}).get("type") in (None, "String")
+    if context.flag_key_compares_as_string is None:
+        metadata = load_property_metadata(
+            context, event_property_names={_FLAG_KEY_PROPERTY}, person_property_names=set(), group_property_names={}
+        )
+        flag_key_type = metadata.event_properties.get(_FLAG_KEY_PROPERTY, {}).get("type")
+        context.flag_key_compares_as_string = flag_key_type in (None, "String")
+    return context.flag_key_compares_as_string
 
 
 def _flag_calls_only_in_flag_evaluations_error(reason: str, view_name: str | None) -> QueryError:
