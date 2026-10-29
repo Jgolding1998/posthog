@@ -38,7 +38,7 @@ from posthog.hogql.context import HogQLContext
 from posthog.hogql.database.database import Database
 from posthog.hogql.database.schema.flag_evaluations import add_events_list_fields_to_flag_evaluations
 from posthog.hogql.database.schema.util.where_clause_extractor import SESSION_BUFFER_DAYS
-from posthog.hogql.errors import QueryError
+from posthog.hogql.errors import QueryError, ResolutionError
 from posthog.hogql.property import property_to_expr
 from posthog.hogql.query import execute_hogql_query
 from posthog.hogql.utils import is_json_verbatim
@@ -778,11 +778,6 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
             ),
             ("select_star", f"SELECT * FROM events WHERE {FLAG_CALL_CONJUNCTS}", "selects \\* or COLUMNS"),
             (
-                "unqualified_event_beside_a_table_function",
-                f"SELECT count() FROM events CROSS JOIN numbers(1) AS n WHERE {FLAG_CALL_CONJUNCTS}",
-                "reads event without a table name.*Write events.event",
-            ),
-            (
                 "with_name_that_a_flag_evaluations_column_shadows",
                 f"WITH 'all calls' AS flag_key SELECT flag_key FROM events WHERE {FLAG_CALL_CONJUNCTS}",
                 "a name in it would read a different column",
@@ -856,11 +851,6 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
                 "SELECT * FROM events WHERE event != '$feature_flag_called' AND timestamp >= now() - INTERVAL 7 DAY",
             ),
             (
-                "flag_calls_and_other_events_beside_a_table_function",
-                "SELECT count() FROM events CROSS JOIN numbers(1) AS n "
-                "WHERE event IN ('$feature_flag_called', '$pageview') AND timestamp >= now() - INTERVAL 7 DAY",
-            ),
-            (
                 "select_star_of_flag_calls_and_other_events",
                 "SELECT * FROM events WHERE event IN ('$feature_flag_called', '$pageview') "
                 "AND timestamp >= now() - INTERVAL 7 DAY",
@@ -871,6 +861,14 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
         self, _name: str, query: str
     ):
         assert self._query_events(query).clickhouse == self._query_events(query, rewrite=False).clickhouse
+
+    def test_query_reading_event_that_another_source_has_raises_instead_of_reading_flag_evaluations(self):
+        query = (
+            "SELECT count() FROM events JOIN (SELECT distinct_id, event FROM events) AS calls "
+            f"ON events.distinct_id = calls.distinct_id WHERE {FLAG_CALL_CONJUNCTS}"
+        )
+        with self.assertRaisesRegex(ResolutionError, "Ambiguous query"):
+            self._query_events(query)
 
     @parameterized.expand(
         [
