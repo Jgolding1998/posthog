@@ -707,6 +707,12 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
             ("element_column", f"SELECT elements_chain FROM events WHERE {FLAG_CALL_CONJUNCTS}", [("",)]),
             ("subquery_in_from", f"SELECT count() FROM (SELECT uuid FROM events WHERE {FLAG_CALL_CONJUNCTS})", [(1,)]),
             (
+                "unqualified_reads_beside_a_joined_subquery",
+                "SELECT count() FROM events JOIN (SELECT 'probe-distinct-id' AS id) AS d ON events.distinct_id = d.id "
+                f"WHERE {FLAG_CALL_CONJUNCTS}",
+                [(1,)],
+            ),
+            (
                 "cte",
                 f"WITH calls AS (SELECT uuid FROM events WHERE {FLAG_CALL_CONJUNCTS}) SELECT count() FROM calls",
                 [(1,)],
@@ -771,6 +777,11 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
                 "reads something that table doesn't have",
             ),
             ("select_star", f"SELECT * FROM events WHERE {FLAG_CALL_CONJUNCTS}", "selects \\* or COLUMNS"),
+            (
+                "unqualified_event_beside_a_table_function",
+                f"SELECT count() FROM events CROSS JOIN numbers(1) AS n WHERE {FLAG_CALL_CONJUNCTS}",
+                "reads event without a table name.*Write events.event",
+            ),
             (
                 "with_name_that_a_flag_evaluations_column_shadows",
                 f"WITH 'all calls' AS flag_key SELECT flag_key FROM events WHERE {FLAG_CALL_CONJUNCTS}",
@@ -843,6 +854,11 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
             (
                 "select_star_excluding_flag_calls",
                 "SELECT * FROM events WHERE event != '$feature_flag_called' AND timestamp >= now() - INTERVAL 7 DAY",
+            ),
+            (
+                "flag_calls_and_other_events_beside_a_table_function",
+                "SELECT count() FROM events CROSS JOIN numbers(1) AS n "
+                "WHERE event IN ('$feature_flag_called', '$pageview') AND timestamp >= now() - INTERVAL 7 DAY",
             ),
             (
                 "select_star_of_flag_calls_and_other_events",
