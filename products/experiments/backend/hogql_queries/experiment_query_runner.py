@@ -282,6 +282,19 @@ class ExperimentQueryRunner(ExperimentResultsCacheMixin, QueryRunner):
     def _metric_events_precompute_applicable(self) -> bool:
         return self._metric_events_precompute.applicable
 
+    def reads_precomputed_metric_events(self) -> bool:
+        """
+        True when a run builds and reads experiment_metric_events_preaggregated, which lives on
+        the aux cluster. The conditions match the ones _get_experiment_query checks before the
+        metric-events build. Reads Postgres and flags only, never ClickHouse.
+        """
+        return (
+            self._should_precompute()
+            and not self.is_data_warehouse_query
+            and self.group_type_index is None
+            and self._metric_events_precompute_applicable()
+        )
+
     def _metric_events_ineligibility_reason(self) -> Optional[str]:
         return self._metric_events_precompute.ineligibility_reason()
 
