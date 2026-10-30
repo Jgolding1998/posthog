@@ -307,7 +307,7 @@ class PropertySwapper(CloningVisitor):
     def _rewrite_json_property_call(self, node: ast.Call) -> ast.Expr | None:
         """Read native JSON functions from the selected property without applying inferred property conversions.
 
-        A lowered PropertyAccess survives the later metadata pass unchanged, so the JSON function determines
+        The read is marked `as_json`, so the metadata pass leaves it unconverted and the JSON function determines
         conversion and defaults. Legacy calls rewrite only when an equivalent materialized column exists.
         """
         property_path = self._simple_json_extract_property_path(node)
@@ -473,12 +473,11 @@ class PropertySwapper(CloningVisitor):
                 order_by=node.order_by,
                 filter_expr=node.filter_expr,
             )
-        property_value = ast.PropertyAccess(
+        property_value = ast.Field(
             start=node.start,
             end=node.end,
-            expr=field_arg,
-            keys=[first_key],
-            type=ast.StringType(nullable=True),
+            chain=[*field_arg.chain, first_key],
+            type=ast.PropertyType(chain=[first_key], field_type=field_type, as_json=True),
         )
         property_document: ast.Expr = ast.Call(
             name="toJSONString",
