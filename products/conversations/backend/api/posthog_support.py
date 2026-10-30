@@ -10,7 +10,7 @@ from django.conf import settings
 from django.db import models
 
 import posthoganalytics
-from drf_spectacular.utils import OpenApiResponse
+from drf_spectacular.utils import OpenApiResponse, extend_schema_serializer
 from rest_framework import serializers, status, viewsets
 from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.request import Request
@@ -21,7 +21,11 @@ from posthog.api.mixins import validated_request
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.event_usage import report_user_action
 from posthog.models import User
-from posthog.rate_limit import PostHogSupportTicketCreateBurstThrottle, PostHogSupportTicketCreateSustainedThrottle
+from posthog.rate_limit import (
+    PostHogSupportTicketCreateBurstThrottle,
+    PostHogSupportTicketCreateSustainedThrottle,
+    PostHogSupportTicketReadThrottle,
+)
 
 from products.conversations.backend.models.constants import TicketStatus
 from products.conversations.backend.services.posthog_support import (
@@ -148,6 +152,16 @@ class PostHogSupportTicketListQuerySerializer(serializers.Serializer):
     offset = serializers.IntegerField(required=False, default=0, min_value=0, help_text="Number of tickets to skip.")
 
 
+class PostHogSupportTicketMessagesQuerySerializer(serializers.Serializer):
+    after = serializers.DateTimeField(
+        required=False,
+        help_text=(
+            "Only return messages sent after this time. When `has_more` is true, pass the `created_at` of the "
+            "last message to read the next page."
+        ),
+    )
+
+
 class PostHogSupportTicketSummarySerializer(serializers.Serializer):
     id = serializers.UUIDField(help_text="Ticket ID. Pass it to posthog-support-ticket-get to read the messages.")
     ticket_number = serializers.IntegerField(help_text="Ticket number that PostHog support uses in replies.")
@@ -159,6 +173,8 @@ class PostHogSupportTicketSummarySerializer(serializers.Serializer):
     created_at = serializers.DateTimeField(help_text="When the ticket was opened.")
 
 
+# `list` returns one `{count, results}` object, so the schema must not wrap it in an array.
+@extend_schema_serializer(many=False)
 class PostHogSupportTicketListSerializer(serializers.Serializer):
     count = serializers.IntegerField(help_text="Total number of the user's tickets that match the filter.")
     results = PostHogSupportTicketSummarySerializer(many=True, help_text="The user's tickets, newest first.")
@@ -213,14 +229,15 @@ def build_ticket_message(data: dict[str, Any]) -> str:
 
 class PostHogSupportTicketViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
     scope_object = "posthog_support"
-    lookup_value_regex = "[0-9a-f-]{36}"
+    lookup_value_regex = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     pagination_class = None
     serializer_class = CreatePostHogSupportTicketSerializer
 
     def get_throttles(self) -> list[BaseThrottle]:
         if self.action == "create":
             return [PostHogSupportTicketCreateBurstThrottle(), PostHogSupportTicketCreateSustainedThrottle()]
-        return super().get_throttles()
+        # Reads share the support project's widget budget with every browser, so one agent must not use it up.
+        return [PostHogSupportTicketReadThrottle()]
 
     def _support(self) -> tuple[PostHogSupportClient, SupportIdentity, User]:
         user = self.request.user
@@ -311,6 +328,7 @@ class PostHogSupportTicketViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSe
         return Response(PostHogSupportTicketListSerializer(result).data)
 
     @validated_request(
+        query_serializer=PostHogSupportTicketMessagesQuerySerializer,
         responses={
             200: OpenApiResponse(response=PostHogSupportTicketDetailSerializer, description="The ticket's messages."),
             403: OpenApiResponse(description="Not available for this user or credential."),
@@ -327,7 +345,8 @@ class PostHogSupportTicketViewSet(TeamAndOrgViewSetMixin, viewsets.GenericViewSe
     def retrieve(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         client, identity, _user = self._support()
         try:
-            result = client.get_ticket(identity, kwargs["pk"])
+            query = cast(dict[str, Any], request.validated_query_data)  # type: ignore[attr-defined]
+            result = client.get_ticket(identity, kwargs["pk"], after=query.get("after"))
         except PostHogSupportRequestFailed as e:
             # The inbox answers 403 for a ticket of another person, so both mean "not yours" here.
             if e.status_code in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND):
