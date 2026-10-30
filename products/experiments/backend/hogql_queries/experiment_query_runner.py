@@ -87,6 +87,11 @@ logger = structlog.get_logger(__name__)
 
 MAX_EXECUTION_TIME = 600
 MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY = 37 * 1024 * 1024 * 1024  # 37 GB
+# A young experiment passes the minimum runtime, and a cohort finishes its first calculation, while a recalc waits.
+_ROUTING_BLOCKING_PRECOMPUTE_SKIP_REASONS = BLOCKING_PRECOMPUTE_SKIP_REASONS - {
+    PrecomputeSkipReason.MIN_RUNTIME,
+    PrecomputeSkipReason.COHORT_NOT_CALCULATED,
+}
 
 
 class ExperimentResultsCacheMixin:
@@ -282,14 +287,15 @@ class ExperimentQueryRunner(ExperimentResultsCacheMixin, QueryRunner):
     def _metric_events_precompute_applicable(self) -> bool:
         return self._metric_events_precompute.applicable
 
-    def reads_precomputed_metric_events(self) -> bool:
+    def may_read_precomputed_metric_events(self) -> bool:
         """
-        True when a run builds and reads experiment_metric_events_preaggregated, which lives on
+        True when a run can build and read experiment_metric_events_preaggregated, which lives on
         the aux cluster. The conditions match the ones _get_experiment_query checks before the
-        metric-events build. Reads Postgres and flags only, never ClickHouse.
+        metric-events build, except that the gates which can open over time count as open, so the
+        answer still holds when the run starts later. Reads Postgres and flags only, never ClickHouse.
         """
         return (
-            self._should_precompute()
+            self._precompute_skip_reason() not in _ROUTING_BLOCKING_PRECOMPUTE_SKIP_REASONS
             and not self.is_data_warehouse_query
             and self.group_type_index is None
             and self._metric_events_precompute_applicable()
