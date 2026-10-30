@@ -43,8 +43,7 @@ import { downloadFile } from 'lib/utils/dom'
 import { clamp } from 'lib/utils/numbers'
 import { objectsEqual } from 'lib/utils/objects'
 import { openBillingPopupModal } from 'scenes/billing/BillingPopup'
-import { MAX_SIDE_PANEL_ID } from 'scenes/max/components/PhaiSidePanelChat'
-import { PhaiViewMode, maxGlobalLogic } from 'scenes/max/maxGlobalLogic'
+import { maxGlobalLogic } from 'scenes/max/maxGlobalLogic'
 import { autoRunMaxPrompt } from 'scenes/max/maxPrompt'
 import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { playerCommentModel } from 'scenes/session-recordings/player/commenting/playerCommentModel'
@@ -64,6 +63,7 @@ import { MatchingEventsMatchType } from 'scenes/session-recordings/playlist/sess
 import { urls } from 'scenes/urls'
 import { userLogic } from 'scenes/userLogic'
 
+import { MAX_SIDE_PANEL_ID, type PhaiViewMode } from '~/layout/ai/aiPanelIds'
 import { sidePanelStateLogic } from '~/layout/navigation-3000/sidepanel/sidePanelStateLogic'
 import {
     AvailableFeature,
