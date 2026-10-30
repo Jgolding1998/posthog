@@ -29,6 +29,7 @@ from products.tasks.backend.facade.profiles import (
     PrAuthorship,
     Repository,
     SourceKind,
+    TaskProfile,
     TaskProfileError,
     TaskRunOptions,
     TaskRunOptionsError,
@@ -58,6 +59,7 @@ REPORT_PROFILE = replace(BUSINESS_KNOWLEDGE, key="test.report", source_kind=Sour
 POSTHOG_AI_BOT_PROFILE = replace(BUSINESS_KNOWLEDGE, key="test.posthog_ai_bot", origin_product="posthog_ai")
 NO_GITHUB_PROFILE = replace(BUSINESS_KNOWLEDGE, key="test.no_github", github_resolution=GithubResolution.NEVER)
 SUPPORT_AGENT_PROFILE = replace(BUSINESS_KNOWLEDGE, key="test.support_agent", mcp_agent="support")
+PI_PROFILE = replace(BUSINESS_KNOWLEDGE, key="test.pi", runtimes=("pi",))
 
 # Far enough back that any bump is unambiguously forward, and stable so a test can assert the
 # clock did *not* move.
@@ -329,16 +331,22 @@ class TestTask(TestCase):
 
     @parameterized.expand(
         [
-            ("runtime", TaskRunOptions(runtime="pi"), ("pi", [])),
+            ("runtime", TaskRunOptions(runtime="pi"), None, ("pi", [])),
             (
                 "repositories",
                 TaskRunOptions(repositories=(Repository(name="posthog/posthog"),)),
+                None,
                 ("acp", ["posthog/posthog"]),
             ),
+            ("profile_runtime", None, PI_PROFILE, ("pi", [])),
         ]
     )
     def test_create_without_run_applies_task_settings(
-        self, name: str, options: TaskRunOptions, expected: tuple[str, list[str]]
+        self,
+        name: str,
+        options: TaskRunOptions | None,
+        profile: TaskProfile | None,
+        expected: tuple[str, list[str]],
     ) -> None:
         user = User.objects.create(email=f"{name}@test.com")
         Integration.objects.create(team=self.team, kind="github", config={})
@@ -348,7 +356,7 @@ class TestTask(TestCase):
             title="t",
             description="d",
             user_id=user.id,
-            origin_product=Task.OriginProduct.USER_CREATED,
+            **({"profile": profile} if profile else {"origin_product": Task.OriginProduct.USER_CREATED}),
             options=options,
         )
 
@@ -682,6 +690,37 @@ class TestTask(TestCase):
 
         self.assertIsNone(task.github_integration)
         self.assertIsNone(task.github_user_integration)
+
+    @parameterized.expand(
+        [
+            ("runtime", PI_PROFILE, ("pi", "default_base")),
+            (
+                "template",
+                replace(BUSINESS_KNOWLEDGE, key="test.autoresearch", sandbox_templates=("autoresearch_base",)),
+                ("acp", "autoresearch_base"),
+            ),
+        ]
+    )
+    @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
+    def test_create_and_run_takes_the_default_runtime_and_template_from_the_profile(
+        self, _name: str, profile: TaskProfile, expected: tuple[str, str], mock_execute_workflow
+    ):
+        user = User.objects.create(email="defaults@test.com")
+
+        with (
+            patch.dict("products.tasks.backend.facade.profiles._profiles", {profile.key: profile}),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            task = Task.create_and_run(
+                team=self.team,
+                title="Profile defaults",
+                description="Picks no runtime or template",
+                profile=profile,
+                user_id=user.id,
+            )
+
+        state = TaskRun.objects.get(id=mock_execute_workflow.call_args.kwargs["run_id"]).state
+        self.assertEqual((task.runtime, state.get("sandbox_template")), expected)
 
     @patch("products.tasks.backend.temporal.client.execute_task_processing_workflow")
     def test_create_and_run_takes_the_agent_key_from_the_profile(self, _mock_execute_workflow):
