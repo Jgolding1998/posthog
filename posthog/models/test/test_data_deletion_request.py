@@ -207,7 +207,15 @@ def test_hogql_predicate_subquery_is_team_scoped(db):
     assert f"equals(team_id, {team_a.id})" not in sql_b
 
 
-def test_compile_hogql_predicate_keeps_a_flag_call_subquery_on_events(team):
+@pytest.mark.parametrize(
+    "events_filter",
+    [
+        "event = '$feature_flag_called' AND properties.$feature_flag = 'probe-flag'",
+        "event IN ('$pageview', '$feature_flag_called')",
+    ],
+    ids=["only_flag_calls", "flag_calls_with_other_events"],
+)
+def test_compile_hogql_predicate_keeps_a_flag_call_subquery_on_events(team, events_filter):
     from posthog.models.data_deletion_request import compile_hogql_predicate
 
     OrganizationFeatureFlagsConfig.objects.update_or_create(
@@ -215,14 +223,15 @@ def test_compile_hogql_predicate_keeps_a_flag_call_subquery_on_events(team):
         defaults={"flag_evaluations_mode": FlagEvaluationsMode.FLAG_EVALUATIONS_ONLY},
     )
     predicate = (
-        "distinct_id IN (SELECT distinct_id FROM events WHERE event = '$feature_flag_called' "
-        "AND properties.$feature_flag = 'probe-flag' AND timestamp >= now() - INTERVAL 7 DAY)"
+        f"distinct_id IN (SELECT distinct_id FROM events WHERE {events_filter} AND timestamp >= now() - INTERVAL 7 DAY)"
     )
     request = DataDeletionRequest(**_base_kwargs(team_id=team.id, events=["$pageview"], hogql_predicate=predicate))
 
     with patch(
         "posthog.hogql.database.database.feature_enabled_or_false",
-        side_effect=lambda key, *args, **kwargs: key == "hogql-flag-calls-from-flag-evaluations",
+        side_effect=lambda key, *args, **kwargs: (
+            key in {"hogql-flag-calls-from-flag-evaluations", "hogql-flag-calls-union"}
+        ),
     ):
         sql, _ = compile_hogql_predicate(request)
 
