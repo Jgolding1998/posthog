@@ -95,6 +95,5 @@ def test_calc_activity_registered_on_recalculation_and_activity_queues():
     ]
     assert len(recalculation_specs) == 1
     assert calculate_experiment_metric_for_recalculation in recalculation_specs[0]
-    # One spec for the activity queue and one for the precompute queue.
     assert activity_queue_specs == [([], EXPERIMENT_RECALCULATION_ACTIVITY_QUEUE_ACTIVITIES)] * 2
     assert EXPERIMENT_RECALCULATION_ACTIVITY_QUEUE_ACTIVITIES == [calculate_experiment_metric_for_recalculation]
