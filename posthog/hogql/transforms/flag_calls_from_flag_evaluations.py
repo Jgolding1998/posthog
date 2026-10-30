@@ -274,11 +274,16 @@ class _EventsScan:
         self.has_other_sources = has_other_sources
         self.flag_key_compares_as_string = flag_key_compares_as_string
         self.shadowed: frozenset[str] = frozenset()
+        self.qualified_by_database = join.alias is None and join.table.chain == ["posthog", "events"]  # type: ignore[union-attr]
 
     @classmethod
     def of(cls, node: ast.SelectQuery, flag_key_compares_as_string: Callable[[], bool]) -> "_EventsScan | None":
         join = node.select_from
-        if join is None or not isinstance(join.table, ast.Field) or join.table.chain != ["events"]:
+        if (
+            join is None
+            or not isinstance(join.table, ast.Field)
+            or join.table.chain not in (["events"], ["posthog", "events"])
+        ):
             return None
         scan = cls(
             join=join,
@@ -304,6 +309,8 @@ class _EventsScan:
             return None
         if expr.chain[0] == self.alias and len(expr.chain) > 1:
             return expr.chain[1:]
+        if self.qualified_by_database and expr.chain[:2] == ["posthog", "events"] and len(expr.chain) > 2:
+            return expr.chain[2:]
         if self.has_other_sources or expr.chain[0] in self.shadowed:
             return None
         return expr.chain
@@ -697,7 +704,10 @@ class _EventsScanSwapper(_SyntaxVisitor):
         for cte in (node.ctes or {}).values():
             self.visit(cte.expr)
             self.ctes = self.ctes.union([cte.name])
-        scan = None if "events" in self.ctes else _EventsScan.of(node, self.flag_key_compares_as_string)
+        scan = _EventsScan.of(node, self.flag_key_compares_as_string)
+        # A CTE named `events` shadows the bare name only, never `posthog.events`.
+        if scan is not None and "events" in self.ctes and scan.join.table.chain == ["events"]:  # type: ignore[union-attr]
+            scan = None
         if scan is not None:
             conjuncts = _filter_conjuncts(node)
             if _qualifies(

@@ -704,6 +704,19 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
                 f"WHERE {FLAG_CALL_CONJUNCTS} GROUP BY flag_key",
                 [("probe-flag", 1)],
             ),
+            ("table_qualified", f"SELECT count() FROM posthog.events WHERE {FLAG_CALL_CONJUNCTS}", [(1,)]),
+            (
+                "table_qualified_with_a_join",
+                "SELECT count() FROM posthog.events AS e JOIN posthog.events AS p ON p.distinct_id = e.distinct_id "
+                "WHERE e.event = '$feature_flag_called' AND e.properties.$feature_flag = 'probe-flag' "
+                "AND e.timestamp >= now() - INTERVAL 7 DAY AND p.event = '$pageview'",
+                [(1,)],
+            ),
+            (
+                "table_qualified_beside_a_cte_named_events",
+                f"WITH events AS (SELECT 1 AS one) SELECT count() FROM posthog.events WHERE {FLAG_CALL_CONJUNCTS}",
+                [(1,)],
+            ),
             ("element_column", f"SELECT elements_chain FROM events WHERE {FLAG_CALL_CONJUNCTS}", [("",)]),
             ("subquery_in_from", f"SELECT count() FROM (SELECT uuid FROM events WHERE {FLAG_CALL_CONJUNCTS})", [(1,)]),
             (
@@ -771,6 +784,13 @@ class TestFlagEvaluationsTable(ClickhouseTestMixin, BaseTest):
                 "reads something that table doesn't have",
             ),
             ("select_star", f"SELECT * FROM events WHERE {FLAG_CALL_CONJUNCTS}", "selects \\* or COLUMNS"),
+            (
+                "columns_qualified_by_the_database",
+                "SELECT posthog.events.event FROM posthog.events WHERE posthog.events.event = '$feature_flag_called' "
+                "AND posthog.events.properties.$feature_flag = 'probe-flag' "
+                "AND posthog.events.timestamp >= now() - INTERVAL 7 DAY",
+                "Unable to resolve field: posthog",
+            ),
             (
                 "with_name_that_a_flag_evaluations_column_shadows",
                 f"WITH 'all calls' AS flag_key SELECT flag_key FROM events WHERE {FLAG_CALL_CONJUNCTS}",
