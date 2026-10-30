@@ -36,8 +36,8 @@ from posthog.storage import object_storage
 
 from products.signals.backend.artefact_schemas import MAX_RANKING_MODEL_RESULTS
 from products.signals.backend.ranking.features import (
+    ALL_PROJECT_VECTOR_KINDS,
     EMBEDDING_DIMENSIONS,
-    PROJECT_VECTOR_KINDS,
     FeatureSet,
     ProjectInputs,
     project_inputs,
@@ -71,9 +71,9 @@ ONNX_OUTPUT = "probabilities"
 ONNX_OUTPUT_HEADS_KEY = "output_heads"
 # The input that takes the feature set's matrix, the report vector.
 ONNX_REPORT_INPUT = "report"
-# The inputs that take the team's project vectors and their history flags, in
-# `PROJECT_VECTOR_KINDS` order. Only a graph whose `metadata.json` lists the kinds under
-# `ONNX_PROJECT_VECTOR_KINDS_KEY` takes them.
+# The inputs that take the team's project vectors and their history flags, in the order of the
+# kinds the graph's `metadata.json` lists under `ONNX_PROJECT_VECTOR_KINDS_KEY`. Only a graph that
+# lists kinds takes them.
 ONNX_PROJECT_INPUT = "project"
 ONNX_HAS_HISTORY_INPUT = "has_history"
 ONNX_PROJECT_VECTOR_KINDS_KEY = "project_vector_kinds"
@@ -107,6 +107,8 @@ class LoadedModel:
     predict: Predict
     # True when `predict` also needs the team's project vectors.
     reads_project_vectors: bool = False
+    # The project vector kinds `predict` reads, in the graph's input order. Empty when it reads none.
+    project_vector_kinds: tuple[str, ...] = ()
 
 
 @frozen
@@ -188,14 +190,13 @@ class ONNXHandler:
         except Exception as error:
             raise ModelLoadError(f"{entry.key} {ONNX_MODEL_FILE} does not load: {error}") from error
         kinds = tuple(metadata.get(ONNX_PROJECT_VECTOR_KINDS_KEY) or ())
-        if kinds and kinds != PROJECT_VECTOR_KINDS:
+        if len(set(kinds)) != len(kinds) or not set(kinds) <= set(ALL_PROJECT_VECTOR_KINDS):
             raise ModelLoadError(
-                f"{entry.key} {METADATA_FILE} {ONNX_PROJECT_VECTOR_KINDS_KEY} {list(kinds)} are not {list(PROJECT_VECTOR_KINDS)}"
+                f"{entry.key} {METADATA_FILE} {ONNX_PROJECT_VECTOR_KINDS_KEY} {list(kinds)} are not distinct kinds "
+                f"from {list(ALL_PROJECT_VECTOR_KINDS)}"
             )
         reads_project_vectors = bool(kinds)
-        mismatch = _onnx_input_mismatch(
-            session.get_inputs(), _onnx_input_shapes(feature_set, reads_project_vectors=reads_project_vectors)
-        )
+        mismatch = _onnx_input_mismatch(session.get_inputs(), _onnx_input_shapes(feature_set, kinds))
         if mismatch is not None:
             raise ModelLoadError(f"{entry.key} {mismatch}")
         output_heads = list(metadata.get(ONNX_OUTPUT_HEADS_KEY) or ())
@@ -220,15 +221,17 @@ class ONNXHandler:
             metadata=metadata,
             predict=predict,
             reads_project_vectors=reads_project_vectors,
+            project_vector_kinds=kinds,
         )
 
 
-def _onnx_input_shapes(feature_set: FeatureSet, *, reads_project_vectors: bool) -> dict[str, tuple[int, ...]]:
-    """The shape after the batch axis of each ONNX input the scorer feeds for `feature_set`."""
+def _onnx_input_shapes(feature_set: FeatureSet, kinds: Sequence[str]) -> dict[str, tuple[int, ...]]:
+    """The shape after the batch axis of each ONNX input the scorer feeds for `feature_set` and the
+    project vector `kinds` the graph reads."""
     shapes: dict[str, tuple[int, ...]] = {ONNX_REPORT_INPUT: (len(feature_set.feature_names),)}
-    if reads_project_vectors:
-        shapes[ONNX_PROJECT_INPUT] = (len(PROJECT_VECTOR_KINDS), EMBEDDING_DIMENSIONS)
-        shapes[ONNX_HAS_HISTORY_INPUT] = (len(PROJECT_VECTOR_KINDS),)
+    if kinds:
+        shapes[ONNX_PROJECT_INPUT] = (len(kinds), EMBEDDING_DIMENSIONS)
+        shapes[ONNX_HAS_HISTORY_INPUT] = (len(kinds),)
     return shapes
 
 
@@ -368,22 +371,35 @@ class ProjectVectors:
 
     # False when the manifest names no object or the object is missing, so no team has vectors.
     available: bool
+    # Each team's vectors in `ALL_PROJECT_VECTOR_KINDS` order.
     by_team: Mapping[int, ProjectInputs]
+    # The kinds the day has rows for, over all its teams. A day written before a kind existed lacks
+    # it, and a model that reads that kind must not score on all-zero vectors.
+    kinds: frozenset[str] = frozenset()
 
-    def for_team(self, team_id: int) -> ProjectInputs | None:
-        """One row of the team's vectors, all zero when the day has no row for the team, or None
-        when the pass has no project vectors at all."""
+    def for_team(self, team_id: int, kinds: Sequence[str]) -> ProjectInputs | None:
+        """One row of the team's vectors of `kinds`, in that order, all zero when the day has no row
+        for the team, or None when the pass has no project vectors at all."""
         if not self.available:
             return None
-        return self.by_team.get(team_id) or project_inputs(pd.DataFrame(columns=PROJECT_VECTORS_COLUMNS), [team_id])
+        inputs = self.by_team.get(team_id) or project_inputs(
+            pd.DataFrame(columns=PROJECT_VECTORS_COLUMNS), [team_id], ALL_PROJECT_VECTOR_KINDS
+        )
+        columns = [ALL_PROJECT_VECTOR_KINDS.index(kind) for kind in kinds]
+        return ProjectInputs(vectors=inputs.vectors[:, columns], has_history=inputs.has_history[:, columns])
+
+    def missing_kinds(self, kinds: Sequence[str]) -> list[str]:
+        """The kinds of `kinds` the day has no rows for."""
+        return [kind for kind in kinds if kind not in self.kinds]
 
 
 def load_project_vectors(manifest: ServingManifest, team_ids: Collection[int]) -> ProjectVectors:
     """The vectors of `team_ids` from the day the manifest names, read once.
 
     Only the rows of `team_ids` are kept, so the pass holds one vector per (team, kind) it scores.
-    A missing object is no vectors at all rather than an empty day, so the models that read them
-    are skipped instead of scoring every team as a team without history.
+    The kinds the day carries are read over every team, so a team without rows does not hide a
+    kind. A missing object is no vectors at all rather than an empty day, so the models that read
+    them are skipped instead of scoring every team as a team without history.
     """
     key = manifest.project_vectors
     teams = sorted({int(team_id) for team_id in team_ids})
@@ -392,15 +408,16 @@ def load_project_vectors(manifest: ServingManifest, team_ids: Collection[int]) -
         if key is not None and teams:
             logger.warning("inbox_ranking_project_vectors_missing", project_vectors_key=key)
         return ProjectVectors(available=False, by_team={})
+    day_kinds = frozenset(pd.read_parquet(io.BytesIO(body), columns=["kind"])["kind"].unique())
     rows = pd.read_parquet(io.BytesIO(body), columns=PROJECT_VECTORS_COLUMNS, filters=[("team_id", "in", teams)])
-    inputs = project_inputs(rows, teams)
+    inputs = project_inputs(rows, teams, ALL_PROJECT_VECTOR_KINDS)
     by_team = {
         team_id: ProjectInputs(
             vectors=inputs.vectors[index : index + 1], has_history=inputs.has_history[index : index + 1]
         )
         for index, team_id in enumerate(teams)
     }
-    return ProjectVectors(available=True, by_team=by_team)
+    return ProjectVectors(available=True, by_team=by_team, kinds=day_kinds)
 
 
 @frozen

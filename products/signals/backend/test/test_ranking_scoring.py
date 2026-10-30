@@ -38,7 +38,13 @@ from products.signals.backend.ranking.features import (
 )
 from products.signals.backend.ranking.model_store import ModelLoadError, load_serving_set
 from products.signals.backend.ranking.overrides import RankingOverrides
-from products.signals.backend.ranking.scorer import NO_PROJECT_VECTORS, NO_VECTOR, ScoringError, score_reports
+from products.signals.backend.ranking.scorer import (
+    NO_PROJECT_VECTORS,
+    NO_VECTOR,
+    PROJECT_VECTOR_KINDS_MISSING,
+    ScoringError,
+    score_reports,
+)
 from products.signals.backend.ranking.serving_manifest import (
     CROSS_FAMILY_ROLE,
     MANIFEST_SERVED_ROLE,
@@ -167,7 +173,14 @@ class FakeObjectStore:
             reads_project_vectors=bool(project_vector_kinds),
         )
 
-    def publish_project_vectors(self, team_id: int, vectors: np.ndarray, has_history: np.ndarray) -> str:
+    def publish_project_vectors(
+        self,
+        team_id: int,
+        vectors: np.ndarray,
+        has_history: np.ndarray,
+        kinds: Sequence[str] = PROJECT_VECTOR_KINDS,
+    ) -> str:
+        """`vectors` and `has_history` hold one row per kind of `kinds`, in that order."""
         key = serving_project_vectors_key(PREFIX, VERSION)
         table = pa.Table.from_pylist(
             [
@@ -177,7 +190,7 @@ class FakeObjectStore:
                     "vector": vectors[index].tolist(),
                     "n_reports": MIN_PROJECT_HISTORY_REPORTS if has_history[index] else 1,
                 }
-                for index, kind in enumerate(PROJECT_VECTOR_KINDS)
+                for index, kind in enumerate(kinds)
             ]
         )
         buffer = io.BytesIO()
@@ -258,13 +271,31 @@ class TestModelStore(_StoreTestMixin, SimpleTestCase):
                 "inputs ['has_history', 'project', 'report'] are not ['report']",
             ),
             (
-                "onnx_project_kinds_in_another_order",
+                "onnx_unknown_project_kind",
                 {
                     "model_kind": ONNX_MODEL_KIND,
                     "onnx_fixture": "project_report.onnx",
-                    "project_vector_kinds": ("open", "typical", "action", "dismiss"),
+                    "project_vector_kinds": ("typical", "open", "action", "starred"),
                 },
-                "project_vector_kinds ['open', 'typical', 'action', 'dismiss']",
+                "project_vector_kinds ['typical', 'open', 'action', 'starred'] are not distinct kinds",
+            ),
+            (
+                "onnx_repeated_project_kind",
+                {
+                    "model_kind": ONNX_MODEL_KIND,
+                    "onnx_fixture": "project_report.onnx",
+                    "project_vector_kinds": ("typical", "open", "open", "dismiss"),
+                },
+                "are not distinct kinds",
+            ),
+            (
+                "onnx_graph_with_fewer_kinds_than_metadata",
+                {
+                    "model_kind": ONNX_MODEL_KIND,
+                    "onnx_fixture": "project_report.onnx",
+                    "project_vector_kinds": (*PROJECT_VECTOR_KINDS, "fixed"),
+                },
+                "input project is tensor(float) ['batch', 4, 1536], not float (batch, 5, 1536)",
             ),
         ]
     )
@@ -441,14 +472,14 @@ class TestScorer(_ScorerTestMixin, SimpleTestCase):
             expected_scores = dict(zip(ONNX_OUTPUT_HEADS, probabilities.tolist()))
             assert results[onnx.key].scores == pytest.approx(expected_scores, abs=1e-6)
 
-    def _project_model(self, roles: Sequence[str]) -> ServingManifestEntry:
+    def _project_model(self, roles: Sequence[str], kinds: Sequence[str] = PROJECT_VECTOR_KINDS) -> ServingManifestEntry:
         return self.store.publish_model(
             "nn",
             REPORT_EMBEDDINGS_FEATURE_SET,
             roles=roles,
             model_kind=ONNX_MODEL_KIND,
             onnx_fixture="project_report.onnx",
-            project_vector_kinds=PROJECT_VECTOR_KINDS,
+            project_vector_kinds=kinds,
         )
 
     def test_an_onnx_model_reads_the_team_project_vectors(self) -> None:
@@ -472,6 +503,53 @@ class TestScorer(_ScorerTestMixin, SimpleTestCase):
             result = outcome.score.results[nn.key]
             assert result.status == "scored"
             assert result.scores == pytest.approx(dict(zip(ONNX_OUTPUT_HEADS, probabilities.tolist())), abs=1e-6)
+
+    @parameterized.expand([("day_with_fixed", True), ("day_without_fixed", False)])
+    def test_a_model_reads_its_own_kinds_and_skips_a_day_without_them(self, _name: str, day_has_fixed: bool) -> None:
+        # The fixture takes four kinds. This model reads `fixed` in the slot a four-kind model reads `dismiss`.
+        kinds = ("typical", "open", "action", "fixed")
+        expected = np.load(ONNX_FIXTURES / "project_report.expected.npz")
+        day_kinds = [*PROJECT_VECTOR_KINDS, "fixed"] if day_has_fixed else list(PROJECT_VECTOR_KINDS)
+        # The day's `dismiss` row differs from the model's last slot, so a model fed `dismiss` scores wrong.
+        rows = {kind: expected["project"][kinds.index(kind)] for kind in kinds if kind in day_kinds}
+        rows["dismiss"] = np.zeros(EMBEDDING_DIMENSIONS, dtype=np.float32)
+        history = {kind: expected["has_history"][kinds.index(kind)] for kind in kinds if kind in day_kinds}
+        history["dismiss"] = np.float32(0.0)
+        key = self.store.publish_project_vectors(
+            self.team_id,
+            np.stack([rows[kind] for kind in day_kinds]),
+            np.array([history[kind] for kind in day_kinds]),
+            kinds=day_kinds,
+        )
+        served = self._served()
+        nn = self._project_model([CROSS_FAMILY_ROLE], kinds=kinds)
+        self.store.publish_manifest([served, nn], project_vectors=key)
+        report_ids = [f"r{index}" for index in range(len(expected["report"]))]
+        vectors = {
+            EMBEDDING_RENDERING_TITLE_SUMMARY: {
+                report_id: ReportVector(embedding=vector, inserted_at=LANDED)
+                for report_id, vector in zip(report_ids, expected["report"])
+            }
+        }
+
+        outcomes, _, _ = self._score(report_ids, vectors, persist=False)
+
+        for outcome, probabilities in zip(outcomes, expected["probabilities"]):
+            assert outcome.score is not None
+            assert outcome.score.results[served.key].status == "scored"
+            result = outcome.score.results[nn.key]
+            if day_has_fixed:
+                assert result.status == "scored"
+                assert result.scores == pytest.approx(dict(zip(ONNX_OUTPUT_HEADS, probabilities.tolist())), abs=1e-6)
+            else:
+                assert (result.status, result.skip_reason) == ("skipped", PROJECT_VECTOR_KINDS_MISSING)
+        if day_has_fixed:
+            return
+
+        model_store.clear_model_cache()
+        self.store.publish_manifest([self._project_model([SERVED_ROLE], kinds=kinds)], project_vectors=key)
+        with self.assertRaisesRegex(ScoringError, r"kinds \['fixed'\]"):
+            self._score(report_ids, vectors, persist=False)
 
     @parameterized.expand(
         [("manifest_names_none", False, None), ("object_missing", True, None), ("object_unreadable", True, b"oops")]

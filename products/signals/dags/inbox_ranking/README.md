@@ -67,9 +67,11 @@ The first four are report grain and land in one table. `inbox_signal_embeddings`
 | `open`    | the last 50 reports anyone on the team opened before `as_of`                                     |
 | `action`  | the last 50 reports anyone on the team acted on through a UI intent action (`UI_ACTION_COLUMNS`) |
 | `dismiss` | the last 50 reports anyone on the team dismissed from the UI                                     |
+| `fixed`   | the last 50 reports the team got fixed (`first_fixed_at`, from the status stream)                |
 
 - The columns are `team_id`, `kind`, `vector` (small-1536), `n_reports` and `as_of`.
-- The inputs are the dt=D `inbox_report_embeddings` and `inbox_report_labels` snapshots only. The engagement moments are the labels' first-event timestamps of the inbox app events, so MCP reads and agent actions never count. A project is a team, not an organization.
+- The inputs are the dt=D `inbox_report_embeddings` and `inbox_report_labels` snapshots only. The `open`, `action` and `dismiss` moments are the labels' first-event timestamps of the inbox app events, so MCP reads and agent actions never count there. The `fixed` moment comes from the status stream, so a fix through an agent counts. A project is a team, not an organization.
+- `PROJECT_VECTORS_SCHEMA_VERSION` 2 adds the `fixed` rows. A version 1 day has the first four kinds only, and a served model that reads `fixed` skips it.
 - A kind with fewer than `MIN_HISTORY_REPORTS` reports keeps its row, with its real `n_reports` and an all-zero vector. A team with no report vector before `as_of` has no rows.
 - The asset filters the embeddings snapshot through `training_consent_team_ids()` again, so an opt-out after the snapshot was written takes effect.
 - **It is a leaf.** Nothing joins it, it is not in `inbox_report_model_data`'s deps, and its object carries its own `PROJECT_VECTORS_SCHEMA_VERSION`, so a failure here does not fail the training table. Its deps on the embeddings and labels assets keep it after the embeddings snapshot, so the two vector-heavy steps do not share the run pod's memory.
@@ -93,11 +95,11 @@ The asset calls it with `as_of` = the end of dt=D, on the dt=D interactions and 
 ### Engagement export
 
 `inbox_engagement_export` sends the UI engagement moments of the other region's reports to the mirror store, so that region can build its own project vectors from its own report embeddings.
-The inbox telemetry of every region lands in the US dogfood project, so the `open`, `action` and `dismiss` moments of an EU report exist only in the US labels snapshot.
+The inbox telemetry of every region lands in the US dogfood project, so the `open`, `action`, `dismiss` and `fixed` moments of an EU report exist only in the US labels snapshot.
 
 - It runs only when `INBOX_RANKING_SERVING_MIRROR_BUCKET` is set. Otherwise it logs and writes nothing.
 - The rows are the dt=D labels rows whose `report_id` has no `SignalReport` in this region's Postgres before the cutoff. A row whose id is not a UUID is dropped.
-- The columns are exactly `LABEL_COLUMNS` from `dataset/project_vectors.py`: `report_id` and the first opened, first UI dismissed and first UI action timestamps. There are no team ids, no counts, no text and no vectors, so the other region passes the file to `project_vectors()` unchanged.
+- The columns are exactly `ENGAGEMENT_EXPORT_COLUMNS` from `dataset/project_vectors.py`: `report_id` and the first opened, first UI dismissed, first UI action and first fixed timestamps. Version 1 of the export had no `first_fixed_at`. There are no team ids, no counts, no text and no vectors, so the other region passes the file to `project_vectors()` unchanged.
 - The labels snapshot is cumulative, so each day is a full snapshot as of the end of dt=D.
 - The key is `serving_engagement_key(prefix, dt)`: `<prefix>/serving/engagement/<dt>/engagement.parquet`. The mirror's write grant covers only `<prefix>/serving/`. The write sets `ACL: bucket-owner-full-control` and stamps the row count, the snapshot date and `ENGAGEMENT_EXPORT_SCHEMA_VERSION` in the object metadata.
 - **It is a leaf.** Nothing joins it. A mirror write failure does not fail the asset: it logs, and the output metadata carries `written=false`. The metadata also carries `rows`, `excluded_rows` (the rows whose report is in this region), `local_share` (`excluded_rows` over all labels rows), `bytes` and `s3_key`.
@@ -114,7 +116,7 @@ The report vectors of a region exist only in its own ClickHouse, so the training
 - It registers on EU only (`is_inbox_ranking_mirror_registered()`), in its own daily job `inbox_ranking_mirror_job` at 05:30 UTC, after the training region's dataset run.
 - The schedule skips its ticks until `INBOX_RANKING_MIRROR_PROJECT_VECTORS_ENABLED` is set. A run by hand works without it.
 - The report vectors come from `report_embeddings_table`, the same function the `inbox_report_embeddings` snapshot uses, for the teams in this region's `training_consent_team_ids()`.
-- The engagement moments come from the dt=D engagement export at `serving_engagement_key`, in this region's object store. When dt=D is missing, it uses the newest export up to `ENGAGEMENT_EXPORT_MAX_AGE_DAYS` older and logs a warning. When none is in that window, or the export has another schema version, the asset fails.
+- The engagement moments come from the dt=D engagement export at `serving_engagement_key`, in this region's object store. When dt=D is missing, it uses the newest export up to `ENGAGEMENT_EXPORT_MAX_AGE_DAYS` older and logs a warning. When none is in that window, or the export has a schema version that `ENGAGEMENT_EXPORT_READS` does not list, the asset fails. A version 2 export builds all five kinds, and a version 1 export builds the four UI kinds.
 - It calls `project_vectors()` in memory with `as_of` at the end of dt=D, and writes no dataset object.
 - The output is `serving_project_vectors_key(prefix, dt)` in this region's object store, stamped with the row count, the snapshot date, `PROJECT_VECTORS_SCHEMA_VERSION` and the export date it read.
 - The output metadata carries the rows, the teams, the teams with enough history for each kind, the export date and its age.
@@ -254,7 +256,7 @@ A region that does not train serves the same models through a mirror. When `INBO
 Project vectors are per-team data, so this region never copies its own day to the mirror. When a manifest entry reads them, the asset looks for the mirror region's own day in the mirror bucket instead:
 
 - It calls `head_object` on `serving_project_vectors_key(prefix, D')` for each day D' from D back to D − `MIRROR_PROJECT_VECTORS_MAX_LAG_DAYS` (3), newest first. The mirror grant has no list permission, so a missing key answers 403, and both read as absent. It reads only the object metadata, never the body.
-- A day passes when its `feature-schema-version` metadata is this build's `PROJECT_VECTORS_SCHEMA_VERSION` and its `engagement-export-date` metadata is no older than D − 3. The key names live in `serving_manifest.py`, and the mirror region's writer uses the same ones.
+- A day passes when its `feature-schema-version` metadata is one of `READABLE_PROJECT_VECTORS_SCHEMA_VERSIONS` and its `engagement-export-date` metadata is no older than D − 3. The key names live in `serving_manifest.py`, and the mirror region's writer uses the same ones.
 - When a day passes, the mirror manifest names it in `project_vectors`, and the publish copies no project vectors object. The mirror region builds day D after the 05:00 UTC publish, so a mirror that keeps up names D−1, one day older than the primary.
 - When no day passes and the served model reads project vectors, the mirror keeps its previous manifest. When only other entries read them, the mirror manifest names none, and the mirror sweep skips those entries.
 - The event carries `mirror_project_vectors_key`, `mirror_project_vectors_date` and `mirror_engagement_export_date`, and `mirror_skip_reason` when the mirror is not published: `no_fresh_project_vectors`, `unknown_schema_version`, `stale_engagement_export` or `publish_failed`. The `inbox_ranking_sweep_finished` log carries the `project_vectors_date` the pass read and its `project_vectors_age_days`.

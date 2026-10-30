@@ -76,7 +76,7 @@ from products.signals.dags.inbox_ranking.dataset.dag import (
     USER_VECTORS_TABLE,
 )
 from products.signals.dags.inbox_ranking.dataset.project_vectors import (
-    PROJECT_VECTORS_SCHEMA_VERSION,
+    READABLE_PROJECT_VECTORS_SCHEMA_VERSIONS,
     USER_VECTORS_SCHEMA_VERSION,
 )
 from products.signals.dags.inbox_ranking.training.examples import (
@@ -741,7 +741,8 @@ class _MirrorProjectVectors:
 
 
 def _project_vectors_refusal(metadata: Mapping[str, str], oldest: datetime.date) -> str | None:
-    if metadata.get(PROJECT_VECTORS_SCHEMA_VERSION_METADATA_KEY) != str(PROJECT_VECTORS_SCHEMA_VERSION):
+    readable = {str(version) for version in READABLE_PROJECT_VECTORS_SCHEMA_VERSIONS}
+    if metadata.get(PROJECT_VECTORS_SCHEMA_VERSION_METADATA_KEY) not in readable:
         return UNKNOWN_SCHEMA_VERSION
     try:
         engagement_date = datetime.date.fromisoformat(metadata.get(PROJECT_VECTORS_ENGAGEMENT_DATE_METADATA_KEY, ""))
